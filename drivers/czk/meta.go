@@ -16,7 +16,7 @@ var config = driver.Config{
 	LocalSort:   false,
 	OnlyProxy:   false,
 	NoCache:     false,
-	NoUpload:    true,
+	NoUpload:    false, // 启用上传功能
 	NeedMs:      false,
 	DefaultRoot: "0",
 }

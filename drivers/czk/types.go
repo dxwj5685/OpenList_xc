@@ -33,3 +33,12 @@ type OperationResp struct {
 	Message string                 `json:"message"`
 	Data    map[string]interface{} `json:"data,omitempty"`
 }
+
+// File 文件信息结构
+type File struct {
+	ID       string `json:"id"`
+	Name     string `json:"name"`
+	Size     int64  `json:"size"`
+	Modified string `json:"modified"`
+	IsFolder bool   `json:"is_folder"`
+}

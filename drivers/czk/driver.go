@@ -3,6 +3,7 @@ package czk
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"mime/multipart"
 	"net/http"
@@ -66,54 +67,63 @@ func (d *CZK) List(ctx context.Context, dir model.Obj, args model.ListArgs) ([]m
 
 	// 解析响应并返回文件列表
 	var listResp map[string]interface{}
-	if err := resp.Unmarshal(&listResp); err != nil {
+	if err := json.Unmarshal(resp.Body(), &listResp); err != nil {
 		return nil, fmt.Errorf("failed to parse file list response: %w", err)
 	}
 
 	// 从响应中提取文件数据
-	var objs []model.Obj
+	var files []File
 	if data, ok := listResp["data"].(map[string]interface{}); ok {
 		if filesData, ok := data["files"].([]interface{}); ok {
 			for _, fileData := range filesData {
 				if fileMap, ok := fileData.(map[string]interface{}); ok {
-					// 解析文件修改时间
-					var modified time.Time
-					if modifiedStr, ok := fileMap["modified"].(string); ok && modifiedStr != "" {
-						// 尝试几种常见的时间格式
-						if t, err := time.Parse(time.RFC3339, modifiedStr); err == nil {
-							modified = t
-						} else if t, err := time.Parse("2006-01-02 15:04:05", modifiedStr); err == nil {
-							modified = t
-						} else {
-							// 如果解析失败，使用当前时间
-							modified = time.Now()
-						}
-					} else {
-						modified = time.Now()
+					file := File{}
+					if id, ok := fileMap["id"].(string); ok {
+						file.ID = id
 					}
-					
-					// 解析文件大小
-					var size int64
-					if sizeVal, ok := fileMap["size"].(float64); ok {
-						size = int64(sizeVal)
+					if name, ok := fileMap["name"].(string); ok {
+						file.Name = name
 					}
-					
-					// 解析是否为文件夹
-					var isFolder bool
-					if isFolderVal, ok := fileMap["is_folder"].(bool); ok {
-						isFolder = isFolderVal
+					if size, ok := fileMap["size"].(float64); ok {
+						file.Size = int64(size)
 					}
-					
-					objs = append(objs, &model.Object{
-						ID:       getStringValue(fileMap["id"]),
-						Name:     getStringValue(fileMap["name"]),
-						Size:     size,
-						Modified: modified,
-						IsFolder: isFolder,
-					})
+					if modified, ok := fileMap["modified"].(string); ok {
+						file.Modified = modified
+					}
+					if isFolder, ok := fileMap["is_folder"].(bool); ok {
+						file.IsFolder = isFolder
+					}
+					files = append(files, file)
 				}
 			}
 		}
+	}
+
+	var objs []model.Obj
+	for _, file := range files {
+		// 解析文件修改时间
+		var modified time.Time
+		if file.Modified != "" {
+			// 尝试几种常见的时间格式
+			if t, err := time.Parse(time.RFC3339, file.Modified); err == nil {
+				modified = t
+			} else if t, err := time.Parse("2006-01-02 15:04:05", file.Modified); err == nil {
+				modified = t
+			} else {
+				// 如果解析失败，使用当前时间
+				modified = time.Now()
+			}
+		} else {
+			modified = time.Now()
+		}
+		
+		objs = append(objs, &model.Object{
+			ID:       file.ID,
+			Name:     file.Name,
+			Size:     file.Size,
+			Modified: modified,
+			IsFolder: file.IsFolder,
+		})
 	}
 	
 	return objs, nil
@@ -135,7 +145,7 @@ func (d *CZK) Link(ctx context.Context, file model.Obj, args model.LinkArgs) (*m
 
 	// 解析响应并返回下载链接
 	var downloadResp map[string]interface{}
-	if err := resp.Unmarshal(&downloadResp); err != nil {
+	if err := json.Unmarshal(resp.Body(), &downloadResp); err != nil {
 		return nil, fmt.Errorf("failed to parse download link response: %w", err)
 	}
 
@@ -176,7 +186,7 @@ func (d *CZK) authenticate() error {
 
 	// 解析认证响应，获取access_token, refresh_token等
 	var authResp AuthResp
-	if err := resp.Unmarshal(&authResp); err != nil {
+	if err := json.Unmarshal(resp.Body(), &authResp); err != nil {
 		return fmt.Errorf("failed to parse auth response: %w", err)
 	}
 	
@@ -221,7 +231,7 @@ func (d *CZK) refreshToken() error {
 
 	// 解析刷新令牌响应，更新access_token等
 	var refreshResp RefreshResp
-	if err := resp.Unmarshal(&refreshResp); err != nil {
+	if err := json.Unmarshal(resp.Body(), &refreshResp); err != nil {
 		return fmt.Errorf("failed to parse refresh response: %w", err)
 	}
 	
@@ -264,8 +274,8 @@ func (d *CZK) MakeDir(ctx context.Context, parentDir model.Obj, dirName string) 
 	}
 
 	// 解析响应
-	var operationResp OperationResp
-	if err := resp.Unmarshal(&operationResp); err != nil {
+	var operationResp map[string]interface{}
+	if err := json.Unmarshal(resp.Body(), &operationResp); err != nil {
 		return nil, fmt.Errorf("failed to parse create folder response: %w", err)
 	}
 
@@ -322,7 +332,7 @@ func (d *CZK) Move(ctx context.Context, srcObj, dstDir model.Obj) (model.Obj, er
 
 	// 解析响应
 	var operationResp map[string]interface{}
-	if err := resp.Unmarshal(&operationResp); err != nil {
+	if err := json.Unmarshal(resp.Body(), &operationResp); err != nil {
 		return nil, fmt.Errorf("failed to parse move response: %w", err)
 	}
 
@@ -378,8 +388,8 @@ func (d *CZK) Rename(ctx context.Context, srcObj model.Obj, newName string) (mod
 	}
 
 	// 解析响应
-	var operationResp OperationResp
-	if err := resp.Unmarshal(&operationResp); err != nil {
+	var operationResp map[string]interface{}
+	if err := json.Unmarshal(resp.Body(), &operationResp); err != nil {
 		return nil, fmt.Errorf("failed to parse rename response: %w", err)
 	}
 
@@ -441,7 +451,7 @@ func (d *CZK) Remove(ctx context.Context, obj model.Obj) error {
 
 	// 解析响应
 	var operationResp map[string]interface{}
-	if err := resp.Unmarshal(&operationResp); err != nil {
+	if err := json.Unmarshal(resp.Body(), &operationResp); err != nil {
 		return fmt.Errorf("failed to parse delete response: %w", err)
 	}
 
@@ -484,7 +494,7 @@ func (d *CZK) Put(ctx context.Context, dstDir model.Obj, file model.FileStreamer
 
 	// 解析初始化上传的响应
 	var initResp map[string]interface{}
-	if err := resp.Unmarshal(&initResp); err != nil {
+	if err := json.Unmarshal(resp.Body(), &initResp); err != nil {
 		return nil, fmt.Errorf("failed to parse upload init response: %w", err)
 	}
 
@@ -524,7 +534,7 @@ func (d *CZK) Put(ctx context.Context, dstDir model.Obj, file model.FileStreamer
 
 	// 解析完成上传的响应
 	var completeRespData map[string]interface{}
-	if err := completeResp.Unmarshal(&completeRespData); err != nil {
+	if err := json.Unmarshal(completeResp.Body(), &completeRespData); err != nil {
 		return nil, fmt.Errorf("failed to parse upload complete response: %w", err)
 	}
 
