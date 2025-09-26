@@ -37,8 +37,8 @@ jobs:
         id: changelog
         run: |
           git tag -l
-          npx changelogithub --output CHANGELOG.md
-
+          npx changelogithub --output CHANGELOG.md --max-commits 30
+          
       - name: Upload assets to beta release
         uses: softprops/action-gh-release@v2
         with:
