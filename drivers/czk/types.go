@@ -1,7 +1,5 @@
 package czk
 
-import "time"
-
 // AuthResp 认证响应结构
 type AuthResp struct {
 	Data struct {
