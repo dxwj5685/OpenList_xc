@@ -416,19 +416,27 @@ func (d *CZK) MakeDir(ctx context.Context, parentDir model.Obj, dirName string) 
 	}
 
 	// 检查响应中是否有错误信息
-	if status, ok := operationResp["status"].(float64); ok && int64(status) != 200 {
+	if code, ok := operationResp["code"].(float64); ok && int64(code) != 200 {
 		message := "unknown error"
-		if msg, ok := operationResp["message"].(string); ok {
+		if msg, ok := operationResp["msg"].(string); ok {
+			message = msg
+		} else if msg, ok := operationResp["message"].(string); ok {
 			message = msg
 		}
-		return nil, fmt.Errorf("create folder API error: status=%d, message=%s", int64(status), message)
+		return nil, fmt.Errorf("create folder API error: code=%d, message=%s", int64(code), message)
+	}
+
+	// 从响应中提取新创建的文件夹ID
+	folderID := ""
+	if data, ok := operationResp["data"].(map[string]interface{}); ok {
+		if id, ok := data["folder_id"].(float64); ok {
+			folderID = fmt.Sprintf("%.0f", id)
+		}
 	}
 
 	// 返回新创建的目录对象
-	// 注意：这里应该根据实际API响应来构建对象
-	// 目前我们创建一个基本的对象
 	newObj := &model.Object{
-		ID:       "", // 应该从响应中获取实际ID
+		ID:       folderID,
 		Name:     dirName,
 		Size:     0,
 		Modified: time.Now(),
