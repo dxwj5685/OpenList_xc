@@ -284,6 +284,8 @@ func (d *CZK) refreshToken() error {
 	
 	resp, err := d.client.R().
 		SetHeader("Content-Type", writer.FormDataContentType()).
+		SetHeader("x-api-key", d.APIKey).
+		SetHeader("x-api-secret", d.APISecret).
 		SetBody(payload.Bytes()).
 		Post(url)
 
