@@ -553,13 +553,13 @@ func (d *CZK) Remove(ctx context.Context, obj model.Obj) error {
 	}
 
 	if resp.StatusCode() != http.StatusOK {
-		return nil, fmt.Errorf("failed to delete item with status %d: %s", resp.StatusCode(), resp.String())
+		return fmt.Errorf("failed to delete item with status %d: %s", resp.StatusCode(), resp.String())
 	}
 
 	// 解析响应
 	var operationResp map[string]interface{}
 	if err := json.Unmarshal(resp.Body(), &operationResp); err != nil {
-		return nil, fmt.Errorf("failed to parse delete response: %w", err)
+		return fmt.Errorf("failed to parse delete response: %w", err)
 	}
 
 	// 检查响应中是否有错误信息
@@ -568,7 +568,7 @@ func (d *CZK) Remove(ctx context.Context, obj model.Obj) error {
 		if msg, ok := operationResp["message"].(string); ok {
 			message = msg
 		}
-		return nil, fmt.Errorf("delete item API error: status=%d, message=%s", int64(status), message)
+		return fmt.Errorf("delete item API error: status=%d, message=%s", int64(status), message)
 	}
 
 	return nil
