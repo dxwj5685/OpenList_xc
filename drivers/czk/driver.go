@@ -284,8 +284,6 @@ func (d *CZK) refreshToken() error {
 	
 	resp, err := d.client.R().
 		SetHeader("Content-Type", writer.FormDataContentType()).
-		SetHeader("x-api-key", d.APIKey).
-		SetHeader("x-api-secret", d.APISecret).
 		SetBody(payload.Bytes()).
 		Post(url)
 
@@ -306,8 +304,8 @@ func (d *CZK) refreshToken() error {
 	// 检查API返回的状态码和成功标志
 	// 当Success为true且Status为200时，表示刷新成功
 	if !refreshResp.Success || refreshResp.Status != 200 {
-		// 特别处理"需要提供刷新令牌"的错误
-		if refreshResp.Message == "需要提供刷新令牌" {
+		// 特别处理"需要提供刷新令牌"和"无效或过期的刷新令牌"的错误
+		if refreshResp.Message == "需要提供刷新令牌" || refreshResp.Message == "无效或过期的刷新令牌" {
 			return fmt.Errorf("token refresh API error: status=%d, success=%t, message=%s, refresh token may be invalid or expired", refreshResp.Status, refreshResp.Success, refreshResp.Message)
 		}
 		return fmt.Errorf("token refresh API error: status=%d, success=%t, message=%s", refreshResp.Status, refreshResp.Success, refreshResp.Message)
