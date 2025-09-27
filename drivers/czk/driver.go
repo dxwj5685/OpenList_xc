@@ -455,12 +455,14 @@ func (d *CZK) Move(ctx context.Context, srcObj, dstDir model.Obj) (model.Obj, er
 		}
 		return "file"
 	}())
-	_ = writer.WriteField("target_id", dstDir.GetID()) // 根据示例使用target_id而不是new_parent_id
+	// 根据API规范，目标目录ID使用target_id参数名
+	_ = writer.WriteField("target_id", dstDir.GetID())
 	err := writer.Close()
 	if err != nil {
 		return nil, fmt.Errorf("failed to create move form: %w", err)
 	}
 
+	// 根据POST接口调用规范，需要在请求头中携带Authorization认证信息
 	resp, err := d.client.R().
 		SetHeader("Authorization", "Bearer "+d.AccessToken).
 		SetHeader("Content-Type", writer.FormDataContentType()).
@@ -481,24 +483,56 @@ func (d *CZK) Move(ctx context.Context, srcObj, dstDir model.Obj) (model.Obj, er
 		return nil, fmt.Errorf("failed to parse move response: %w", err)
 	}
 
-	// 检查响应中是否有错误信息
-	if status, ok := operationResp["status"].(float64); ok && int64(status) != 200 {
+	// 检查响应中是否有错误信息，根据API示例使用code字段
+	if code, ok := operationResp["code"].(float64); ok && int64(code) != 200 {
 		message := "unknown error"
 		if msg, ok := operationResp["message"].(string); ok {
 			message = msg
+		} else if msg, ok := operationResp["msg"].(string); ok {
+			// 根据示例响应，也可能使用msg字段
+			message = msg
 		}
-		return nil, fmt.Errorf("move item API error: status=%d, message=%s", int64(status), message)
+		return nil, fmt.Errorf("move item API error: code=%d, message=%s", int64(code), message)
 	}
 
-	// 返回更新后的对象
-	// 注意：这里应该根据实际API响应来构建对象
-	// 目前我们简单地复制原对象并更新父目录
+	// 根据API示例响应格式解析返回的数据
+	// 示例: {"code": 200, "msg": "成功", "data": {"items": [...]}}
 	newObj := &model.Object{
 		ID:       srcObj.GetID(),
 		Name:     srcObj.GetName(),
 		Size:     srcObj.GetSize(),
 		Modified: time.Now(),
 		IsFolder: srcObj.IsDir(),
+	}
+
+	// 从响应中提取更新后的对象信息
+	if data, ok := operationResp["data"].(map[string]interface{}); ok {
+		if items, ok := data["items"].([]interface{}); ok && len(items) > 0 {
+			// 查找被移动的对象
+			for _, itemData := range items {
+				if itemMap, ok := itemData.(map[string]interface{}); ok {
+					if id, ok := itemMap["id"].(float64); ok && fmt.Sprintf("%.0f", id) == srcObj.GetID() {
+						// 找到被移动的对象，更新信息
+						if name, ok := itemMap["name"].(string); ok {
+							newObj.Name = name
+						}
+
+						if parentId, ok := itemMap["parent_id"].(float64); ok {
+							// parentId 是新的父目录ID，但模型中没有直接存储这个信息
+							// 我们只需要确保对象信息是最新的
+						}
+
+						if createdAt, ok := itemMap["created_at"].(string); ok {
+							if t, err := time.Parse("2006-01-02 15:04:05", createdAt); err == nil {
+								newObj.Modified = t
+							}
+						}
+
+						break
+					}
+				}
+			}
+		}
 	}
 
 	return newObj, nil
@@ -612,13 +646,14 @@ func (d *CZK) Remove(ctx context.Context, obj model.Obj) error {
 		return fmt.Errorf("failed to parse delete response: %w", err)
 	}
 
-	// 检查响应中是否有错误信息
-	if status, ok := operationResp["status"].(float64); ok && int64(status) != 200 {
+	// 检查响应中是否有错误信息，根据API示例使用code字段
+	if code, ok := operationResp["code"].(float64); ok && int64(code) != 200 {
 		message := "unknown error"
-		if msg, ok := operationResp["message"].(string); ok {
+		if msg, ok := operationResp["msg"].(string); ok {
+			// 根据API文档，使用msg字段而非message字段
 			message = msg
 		}
-		return fmt.Errorf("delete item API error: status=%d, message=%s", int64(status), message)
+		return fmt.Errorf("delete item API error: code=%d, message=%s", int64(code), message)
 	}
 
 	return nil
@@ -664,13 +699,14 @@ func (d *CZK) Put(ctx context.Context, dstDir model.Obj, file model.FileStreamer
 		return nil, fmt.Errorf("failed to parse upload init response: %w", err)
 	}
 
-	// 检查响应中是否有错误信息
-	if status, ok := initResp["status"].(float64); ok && int64(status) != 200 {
+	// 检查响应中是否有错误信息，根据API示例使用code字段
+	if code, ok := initResp["code"].(float64); ok && int64(code) != 200 {
 		message := "unknown error"
-		if msg, ok := initResp["message"].(string); ok {
+		if msg, ok := initResp["msg"].(string); ok {
+			// 根据API文档，使用msg字段而非message字段
 			message = msg
 		}
-		return nil, fmt.Errorf("init upload API error: status=%d, message=%s", int64(status), message)
+		return nil, fmt.Errorf("init upload API error: code=%d, message=%s", int64(code), message)
 	}
 
 	// 从初始化响应中提取需要的参数
@@ -728,13 +764,14 @@ func (d *CZK) Put(ctx context.Context, dstDir model.Obj, file model.FileStreamer
 		return nil, fmt.Errorf("failed to parse upload complete response: %w", err)
 	}
 
-	// 检查响应中是否有错误信息
-	if status, ok := completeRespData["status"].(float64); ok && int64(status) != 200 {
+	// 检查响应中是否有错误信息，根据API示例使用code字段
+	if code, ok := completeRespData["code"].(float64); ok && int64(code) != 200 {
 		message := "unknown error"
-		if msg, ok := completeRespData["message"].(string); ok {
+		if msg, ok := completeRespData["msg"].(string); ok {
+			// 根据API文档，使用msg字段而非message字段
 			message = msg
 		}
-		return nil, fmt.Errorf("complete upload API error: status=%d, message=%s", int64(status), message)
+		return nil, fmt.Errorf("complete upload API error: code=%d, message=%s", int64(code), message)
 	}
 
 	// 返回新创建的文件对象
