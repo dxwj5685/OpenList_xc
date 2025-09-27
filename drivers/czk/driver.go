@@ -34,6 +34,8 @@ func (d *CZK) GetAddition() driver.Additional {
 
 func (d *CZK) Init(ctx context.Context) error {
 	d.client = resty.New()
+	// 设置自定义User-Agent
+	d.client.SetHeader("User-Agent", "openlist")
 	
 	// 获取访问令牌
 	if err := d.authenticate(); err != nil {
@@ -55,6 +57,7 @@ func (d *CZK) List(ctx context.Context, dir model.Obj, args model.ListArgs) ([]m
 	url := fmt.Sprintf("https://pan.szczk.top/czkapi/list_files?folder_id=%s", dir.GetID())
 	resp, err := d.client.R().
 		SetHeader("Authorization", "Bearer "+d.AccessToken).
+		SetHeader("User-Agent", "openlist").
 		Get(url)
 
 	if err != nil {
@@ -147,6 +150,7 @@ func (d *CZK) Link(ctx context.Context, file model.Obj, args model.LinkArgs) (*m
 	url := fmt.Sprintf("https://pan.szczk.top/czkapi/get_download_url?file_id=%s", file.GetID())
 	resp, err := d.client.R().
 		SetHeader("Authorization", "Bearer "+d.AccessToken).
+		SetHeader("User-Agent", "openlist").
 		Get(url)
 
 	if err != nil {
@@ -201,6 +205,7 @@ func (d *CZK) authenticate() error {
 	resp, err := d.client.R().
 		SetHeader("x-api-key", d.APIKey).
 		SetHeader("x-api-secret", d.APISecret).
+		SetHeader("User-Agent", "openlist").
 		Get(url)
 
 	if err != nil {
@@ -253,6 +258,7 @@ func (d *CZK) refreshToken() error {
 	
 	resp, err := d.client.R().
 		SetHeader("Content-Type", writer.FormDataContentType()).
+		SetHeader("User-Agent", "openlist").
 		SetBody(payload.Bytes()).
 		Post(url)
 
@@ -302,6 +308,7 @@ func (d *CZK) MakeDir(ctx context.Context, parentDir model.Obj, dirName string) 
 	resp, err := d.client.R().
 		SetHeader("Authorization", "Bearer "+d.AccessToken).
 		SetHeader("Content-Type", writer.FormDataContentType()).
+		SetHeader("User-Agent", "openlist").
 		SetBody(payload.Bytes()).
 		Post(url)
 
@@ -368,6 +375,7 @@ func (d *CZK) Move(ctx context.Context, srcObj, dstDir model.Obj) (model.Obj, er
 	resp, err := d.client.R().
 		SetHeader("Authorization", "Bearer "+d.AccessToken).
 		SetHeader("Content-Type", writer.FormDataContentType()).
+		SetHeader("User-Agent", "openlist").
 		SetBody(payload.Bytes()).
 		Post(url)
 
@@ -434,6 +442,7 @@ func (d *CZK) Rename(ctx context.Context, srcObj model.Obj, newName string) (mod
 	resp, err := d.client.R().
 		SetHeader("Authorization", "Bearer "+d.AccessToken).
 		SetHeader("Content-Type", writer.FormDataContentType()).
+		SetHeader("User-Agent", "openlist").
 		SetBody(payload.Bytes()).
 		Post(url)
 
@@ -499,6 +508,7 @@ func (d *CZK) Remove(ctx context.Context, obj model.Obj) error {
 	resp, err := d.client.R().
 		SetHeader("Authorization", "Bearer "+d.AccessToken).
 		SetHeader("Content-Type", writer.FormDataContentType()).
+		SetHeader("User-Agent", "openlist").
 		SetBody(payload.Bytes()).
 		Post(url)
 
@@ -507,13 +517,13 @@ func (d *CZK) Remove(ctx context.Context, obj model.Obj) error {
 	}
 
 	if resp.StatusCode() != http.StatusOK {
-		return fmt.Errorf("failed to delete item with status %d: %s", resp.StatusCode(), resp.String())
+		return nil, fmt.Errorf("failed to delete item with status %d: %s", resp.StatusCode(), resp.String())
 	}
 
 	// 解析响应
 	var operationResp map[string]interface{}
 	if err := json.Unmarshal(resp.Body(), &operationResp); err != nil {
-		return fmt.Errorf("failed to parse delete response: %w", err)
+		return nil, fmt.Errorf("failed to parse delete response: %w", err)
 	}
 
 	// 检查响应中是否有错误信息
@@ -522,7 +532,7 @@ func (d *CZK) Remove(ctx context.Context, obj model.Obj) error {
 		if msg, ok := operationResp["message"].(string); ok {
 			message = msg
 		}
-		return fmt.Errorf("delete item API error: status=%d, message=%s", int64(status), message)
+		return nil, fmt.Errorf("delete item API error: status=%d, message=%s", int64(status), message)
 	}
 
 	return nil
@@ -551,6 +561,7 @@ func (d *CZK) Put(ctx context.Context, dstDir model.Obj, file model.FileStreamer
 	resp, err := d.client.R().
 		SetHeader("Authorization", "Bearer "+d.AccessToken).
 		SetHeader("Content-Type", writer.FormDataContentType()).
+		SetHeader("User-Agent", "openlist").
 		SetBody(payload.Bytes()).
 		Post(initURL)
 
@@ -615,6 +626,7 @@ func (d *CZK) Put(ctx context.Context, dstDir model.Obj, file model.FileStreamer
 	completeResp, err := d.client.R().
 		SetHeader("Authorization", "Bearer "+d.AccessToken).
 		SetHeader("Content-Type", completeWriter.FormDataContentType()).
+		SetHeader("User-Agent", "openlist").
 		SetBody(completePayload.Bytes()).
 		Post(completeURL)
 
