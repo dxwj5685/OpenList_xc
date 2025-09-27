@@ -735,6 +735,9 @@ func (d *CZK) Put(ctx context.Context, dstDir model.Obj, file model.FileStreamer
 		return nil, fmt.Errorf("failed to parse upload init response: %w", err)
 	}
 
+	// 记录响应内容用于调试
+	log.Printf("CZK Put init upload response: %+v", initResp)
+
 	// 检查响应中是否有错误信息，根据API示例使用code字段
 	if code, ok := initResp["code"].(float64); ok && int64(code) != 200 {
 		message := "unknown error"
@@ -758,13 +761,16 @@ func (d *CZK) Put(ctx context.Context, dstDir model.Obj, file model.FileStreamer
 		if key, ok := data["file_key"].(string); ok {
 			fileKey = key
 		}
+		log.Printf("CZK Put extracted from init response: csrf_token=%s, file_key=%s", csrfToken, fileKey)
+	} else {
+		log.Printf("CZK Put failed to parse data field from init response: %+v", initResp)
 	}
 
 	// 检查必要参数是否存在
 	if csrfToken == "" || fileKey == "" {
 		// 恢复默认超时时间
 		d.client.SetTimeout(30 * time.Second)
-		return nil, fmt.Errorf("missing required parameters from init upload response: csrf_token=%s, file_key=%s", csrfToken, fileKey)
+		return nil, fmt.Errorf("missing required parameters from init upload response: csrf_token=%s, file_key=%s, full response: %+v", csrfToken, fileKey, initResp)
 	}
 
 	// 完成上传
@@ -809,6 +815,9 @@ func (d *CZK) Put(ctx context.Context, dstDir model.Obj, file model.FileStreamer
 		return nil, fmt.Errorf("failed to parse upload complete response: %w", err)
 	}
 
+	// 记录响应内容用于调试
+	log.Printf("CZK Put complete upload response: %+v", completeRespData)
+
 	// 检查响应中是否有错误信息，根据API示例使用code字段
 	if code, ok := completeRespData["code"].(float64); ok && int64(code) != 200 {
 		message := "unknown error"
@@ -819,9 +828,17 @@ func (d *CZK) Put(ctx context.Context, dstDir model.Obj, file model.FileStreamer
 		return nil, fmt.Errorf("complete upload API error: code=%d, message=%s", int64(code), message)
 	}
 
+	// 从响应中提取文件ID
+	fileID := ""
+	if data, ok := completeRespData["data"].(map[string]interface{}); ok {
+		if id, ok := data["file_id"].(float64); ok {
+			fileID = fmt.Sprintf("%.0f", id)
+		}
+	}
+
 	// 返回新创建的文件对象
 	newObj := &model.Object{
-		ID:       "", // 应该从响应中获取实际ID
+		ID:       fileID,
 		Name:     file.GetName(),
 		Size:     file.GetSize(),
 		Modified: time.Now(),
