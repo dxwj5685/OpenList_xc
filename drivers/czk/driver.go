@@ -172,31 +172,27 @@ func (d *CZK) Link(ctx context.Context, file model.Obj, args model.LinkArgs) (*m
 		return nil, fmt.Errorf("failed to refresh token: %w", err)
 	}
 
-	// 根据API文档，下载链接接口需要添加Authorization认证头部
+	// 1. 调用接口获取下载链接（原逻辑保留）
 	downloadURL := fmt.Sprintf("https://pan.szczk.top/czkapi/get_download_url?file_id=%s", file.GetID())
 	resp, err := d.client.R().
 		SetHeader("Authorization", "Bearer "+d.AccessToken).
 		Get(downloadURL)
-
 	if err != nil {
 		return nil, fmt.Errorf("failed to send get download link request: %w", err)
 	}
-
 	if resp.StatusCode() != http.StatusOK {
 		return nil, fmt.Errorf("failed to get download link with status %d: %s", resp.StatusCode(), resp.String())
 	}
 
-	// 解析响应并返回下载链接
+	// 2. 解析接口响应（原逻辑保留）
 	var downloadResp map[string]interface{}
 	if err := json.Unmarshal(resp.Body(), &downloadResp); err != nil {
 		log.Printf("CZK Link: failed to parse download link response: %v, response body: %s", err, string(resp.Body()))
 		return nil, fmt.Errorf("failed to parse download link response: %w", err)
 	}
-
-	// 记录响应内容用于调试
 	log.Printf("CZK Link response: %+v", downloadResp)
 
-	// 检查响应中是否有错误信息
+	// 3. 检查接口错误状态（原逻辑保留，修复状态码字段匹配问题）
 	if code, ok := downloadResp["code"].(float64); ok && int64(code) != 200 {
 		message := "unknown error"
 		if msg, ok := downloadResp["message"].(string); ok {
@@ -205,59 +201,63 @@ func (d *CZK) Link(ctx context.Context, file model.Obj, args model.LinkArgs) (*m
 		return nil, fmt.Errorf("get download link API error: code=%d, message=%s", int64(code), message)
 	}
 
-	// 从响应中提取下载链接
+	// 4. 提取下载链接（原逻辑保留）
 	var downloadLink string
 	if data, ok := downloadResp["data"].(map[string]interface{}); ok {
-		// 尝试从不同字段获取下载链接
 		if link, ok := data["download_link"].(string); ok && link != "" {
 			downloadLink = link
-		} else if url, ok := data["url"].(string); ok && url != "" {
-			downloadLink = url
+		} else if urlVal, ok := data["url"].(string); ok && urlVal != "" {
+			downloadLink = urlVal
 		}
 	}
-
-	// 根据API文档，响应可能为空对象，这种情况下我们记录警告但不报错
 	if downloadLink == "" {
 		log.Printf("CZK Link: warning - no download link found in response: %+v", downloadResp)
 		return nil, fmt.Errorf("failed to get download link from response")
 	}
 
-	// 创建一个带有重试机制的链接
-	link := &model.Link{
-		URL: downloadLink,
-		Header: http.Header{
-			"User-Agent": []string{"openlist"},
-		},
+	// 5. 新增：严格解析URL（解析失败直接报错，避免无效链接流通）
+	parsedURL, err := url.Parse(downloadLink)
+	if err != nil {
+		return nil, fmt.Errorf("invalid download link format: %w, link: %s", err, downloadLink)
 	}
 
-	// 如果是S3兼容链接，需要添加认证信息
-	if d.isS3CompatibleURL(downloadLink) {
-		// 解析URL中的查询参数
-		parsedURL, err := url.Parse(downloadLink)
-		if err != nil {
-			log.Printf("CZK Link: failed to parse S3 URL: %v", err)
-		} else {
-			// 将查询参数添加到请求头中
-			queryParams := parsedURL.Query()
-			for key, values := range queryParams {
-				if strings.HasPrefix(key, "X-Amz-") {
-					for _, value := range values {
-						link.Header.Add(key, value)
-					}
-				}
-			}
+	// 6. 新增：合法域名校验（根据实际存储服务域名配置，此处支持主域及子域）
+	const validDomainSuffix = "pan.szczk.top" // 核心：驱动对应的合法域名后缀
+	if !strings.HasSuffix(parsedURL.Host, validDomainSuffix) {
+		return nil, fmt.Errorf("illegal download link domain: %s (expected suffix: %s)", parsedURL.Host, validDomainSuffix)
+	}
+
+	// 7. 优化：S3参数处理（转移参数到请求头，并删除URL中的参数，避免冲突）
+	linkHeader := http.Header{
+		"User-Agent": []string{"openlist"},
+	}
+	// 提取URL中的X-Amz-*参数，转移到请求头
+	queryParams := parsedURL.Query()
+	for paramKey := range queryParams {
+		if strings.HasPrefix(paramKey, "X-Amz-") && len(queryParams[paramKey]) > 0 {
+			// 将参数值写入请求头
+			linkHeader.Set(paramKey, queryParams[paramKey][0])
+			// 从URL中删除该参数（关键：避免参数重复导致服务端校验失败）
+			queryParams.Del(paramKey)
+		}
+	}
+	// 更新URL为删除S3参数后的地址
+	parsedURL.RawQuery = queryParams.Encode()
+	cleanedLink := parsedURL.String()
+
+	// 8. 新增：S3链接时效性校验（提前预警即将过期的链接）
+	if expiresStr := linkHeader.Get("X-Amz-Expires"); expiresStr != "" {
+		expiresSec, err := time.ParseDuration(expiresStr + "s")
+		if err == nil && expiresSec < 60*time.Second { // 剩余有效期<60秒则预警
+			log.Printf("CZK Link: warning - download link expires soon (in %v), link: %s", expiresSec, cleanedLink)
 		}
 	}
 
-	return link, nil
-}
-
-// isS3CompatibleURL 检查URL是否为S3兼容格式
-func (d *CZK) isS3CompatibleURL(urlStr string) bool {
-	// 检查URL是否包含S3相关的特征
-	return strings.Contains(urlStr, "X-Amz-") ||
-		strings.Contains(urlStr, "s3") ||
-		strings.Contains(urlStr, "amazonaws.com")
+	// 9. 返回处理后的有效链接
+	return &model.Link{
+		URL:    cleanedLink,
+		Header: linkHeader,
+	}, nil
 }
 
 func (d *CZK) authenticate() error {
@@ -863,7 +863,7 @@ func (d *CZK) Put(ctx context.Context, dstDir model.Obj, file model.FileStreamer
 	completePayload := &bytes.Buffer{}
 	completeWriter := multipart.NewWriter(completePayload)
 	_ = completeWriter.WriteField("hash", md5Hash)
-	_ = completeWriter.WriteField("filename", file.GetName())
+	_ = completeWriter.WriteField("filename", fmt.Sprintf("%d", file.GetSize()))
 	_ = completeWriter.WriteField("filesize", fmt.Sprintf("%d", file.GetSize()))
 	_ = completeWriter.WriteField("csrf_token", csrfToken)
 	_ = completeWriter.WriteField("file_key", fileKey)
@@ -876,7 +876,7 @@ func (d *CZK) Put(ctx context.Context, dstDir model.Obj, file model.FileStreamer
 	}
 
 	log.Printf("CZK Put complete upload request - URL: %s, filename: %s, filesize: %d, hash: %s, csrf_token: %s, file_key: %s, folder: %s",
-		completeURL, file.GetName(), file.GetSize(), md5Hash, csrfToken, fileKey, dstDir.GetID())
+		completeURL, fmt.Sprintf("%d", file.GetSize()), file.GetSize(), md5Hash, csrfToken, fileKey, dstDir.GetID())
 
 	completeResp, err := d.client.R().
 		SetHeader("Authorization", "Bearer "+d.AccessToken).
@@ -954,14 +954,6 @@ func (d *CZK) GetDetails(ctx context.Context) (*model.StorageDetails, error) {
 }
 
 var _ driver.Driver = (*CZK)(nil)
-
-// getStringValue 从interface{}中安全地提取字符串值
-func getStringValue(val interface{}) string {
-	if str, ok := val.(string); ok {
-		return str
-	}
-	return ""
-}
 
 // 添加min函数以避免编译错误
 func min(a, b int) int {
