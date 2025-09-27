@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"mime/multipart"
 	"net/http"
@@ -13,6 +14,8 @@ import (
 	"github.com/OpenListTeam/OpenList/v4/internal/driver"
 	"github.com/OpenListTeam/OpenList/v4/internal/errs"
 	"github.com/OpenListTeam/OpenList/v4/internal/model"
+	"github.com/OpenListTeam/OpenList/v4/internal/stream"
+	"github.com/OpenListTeam/OpenList/v4/pkg/utils"
 	"github.com/go-resty/resty/v2"
 )
 
@@ -671,17 +674,30 @@ func (d *CZK) Put(ctx context.Context, dstDir model.Obj, file model.FileStreamer
 		return nil, fmt.Errorf("failed to refresh token: %w", err)
 	}
 
+	// 使用OpenList提供的工具函数计算文件的MD5哈希值
+	tempFile, md5Hash, err := stream.CacheFullAndHash(file, &up, utils.MD5)
+	if err != nil {
+		return nil, fmt.Errorf("failed to calculate file md5: %w", err)
+	}
+
+	// 重置文件流以便后续使用
+	if seeker, ok := tempFile.(io.Seeker); ok {
+		if _, err := seeker.Seek(0, io.SeekStart); err != nil {
+			return nil, fmt.Errorf("failed to seek file: %w", err)
+		}
+	}
+
 	// 初始化上传
 	initURL := "https://pan.szczk.top/czkapi/first_upload"
 
 	// 创建表单数据
 	payload := &bytes.Buffer{}
 	writer := multipart.NewWriter(payload)
-	_ = writer.WriteField("hash", "") // 简化处理，实际应计算文件hash
+	_ = writer.WriteField("hash", md5Hash)
 	_ = writer.WriteField("filename", file.GetName())
 	_ = writer.WriteField("filesize", fmt.Sprintf("%d", file.GetSize()))
 	_ = writer.WriteField("folder", dstDir.GetID())
-	err := writer.Close()
+	err = writer.Close()
 	if err != nil {
 		return nil, fmt.Errorf("failed to create init upload form: %w", err)
 	}
@@ -740,7 +756,7 @@ func (d *CZK) Put(ctx context.Context, dstDir model.Obj, file model.FileStreamer
 	// 创建完成上传的表单数据
 	completePayload := &bytes.Buffer{}
 	completeWriter := multipart.NewWriter(completePayload)
-	_ = completeWriter.WriteField("hash", "") // 简化处理，实际应使用文件hash
+	_ = completeWriter.WriteField("hash", md5Hash)
 	_ = completeWriter.WriteField("filename", file.GetName())
 	_ = completeWriter.WriteField("filesize", fmt.Sprintf("%d", file.GetSize()))
 	_ = completeWriter.WriteField("csrf_token", csrfToken)
