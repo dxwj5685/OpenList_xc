@@ -709,6 +709,9 @@ func (d *CZK) Put(ctx context.Context, dstDir model.Obj, file model.FileStreamer
 		return nil, fmt.Errorf("failed to create init upload form: %w", err)
 	}
 
+	log.Printf("CZK Put init upload request - URL: %s, filename: %s, filesize: %d, hash: %s, folder: %s",
+		initURL, file.GetName(), file.GetSize(), md5Hash, dstDir.GetID())
+
 	resp, err := d.client.R().
 		SetHeader("Authorization", "Bearer "+d.AccessToken).
 		SetHeader("Content-Type", writer.FormDataContentType()).
@@ -753,6 +756,7 @@ func (d *CZK) Put(ctx context.Context, dstDir model.Obj, file model.FileStreamer
 	// 从初始化响应中提取需要的参数
 	csrfToken := ""
 	fileKey := ""
+	uploadURL := ""
 
 	if data, ok := initResp["data"].(map[string]interface{}); ok {
 		if token, ok := data["csrf_token"].(string); ok {
@@ -761,7 +765,10 @@ func (d *CZK) Put(ctx context.Context, dstDir model.Obj, file model.FileStreamer
 		if key, ok := data["file_key"].(string); ok {
 			fileKey = key
 		}
-		log.Printf("CZK Put extracted from init response: csrf_token=%s, file_key=%s", csrfToken, fileKey)
+		if url, ok := data["upload_url"].(string); ok {
+			uploadURL = url
+		}
+		log.Printf("CZK Put extracted from init response: csrf_token=%s, file_key=%s, upload_url=%s", csrfToken, fileKey, uploadURL)
 	} else {
 		log.Printf("CZK Put failed to parse data field from init response: %+v", initResp)
 	}
@@ -771,6 +778,39 @@ func (d *CZK) Put(ctx context.Context, dstDir model.Obj, file model.FileStreamer
 		// 恢复默认超时时间
 		d.client.SetTimeout(30 * time.Second)
 		return nil, fmt.Errorf("missing required parameters from init upload response: csrf_token=%s, file_key=%s, full response: %+v", csrfToken, fileKey, initResp)
+	}
+
+	// 如果有upload_url，则需要先上传文件到该URL
+	if uploadURL != "" {
+		log.Printf("CZK Put uploading file to: %s", uploadURL)
+
+		// 重置文件流到开始位置
+		if seeker, ok := tempFile.(io.Seeker); ok {
+			if _, err := seeker.Seek(0, io.SeekStart); err != nil {
+				// 恢复默认超时时间
+				d.client.SetTimeout(30 * time.Second)
+				return nil, fmt.Errorf("failed to seek file: %w", err)
+			}
+		}
+
+		// 上传文件到指定的URL
+		uploadResp, err := d.client.R().
+			SetBody(tempFile).
+			Put(uploadURL)
+
+		if err != nil {
+			// 恢复默认超时时间
+			d.client.SetTimeout(30 * time.Second)
+			return nil, fmt.Errorf("failed to upload file to storage: %w", err)
+		}
+
+		if uploadResp.StatusCode() != http.StatusOK {
+			// 恢复默认超时时间
+			d.client.SetTimeout(30 * time.Second)
+			return nil, fmt.Errorf("failed to upload file to storage with status %d: %s", uploadResp.StatusCode(), uploadResp.String())
+		}
+
+		log.Printf("CZK Put file uploaded to storage successfully")
 	}
 
 	// 完成上传
@@ -791,6 +831,9 @@ func (d *CZK) Put(ctx context.Context, dstDir model.Obj, file model.FileStreamer
 		d.client.SetTimeout(30 * time.Second)
 		return nil, fmt.Errorf("failed to create complete upload form: %w", err)
 	}
+
+	log.Printf("CZK Put complete upload request - URL: %s, filename: %s, filesize: %d, hash: %s, csrf_token: %s, file_key: %s, folder: %s",
+		completeURL, file.GetName(), file.GetSize(), md5Hash, csrfToken, fileKey, dstDir.GetID())
 
 	completeResp, err := d.client.R().
 		SetHeader("Authorization", "Bearer "+d.AccessToken).
