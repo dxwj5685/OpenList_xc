@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"mime/multipart"
 	"net/http"
 	"time"
@@ -34,7 +35,8 @@ func (d *CZK) GetAddition() driver.Additional {
 
 func (d *CZK) Init(ctx context.Context) error {
 	d.client = resty.New()
-	// 设置自定义User-Agent
+	
+	// 设置全局User-Agent
 	d.client.SetHeader("User-Agent", "openlist")
 	
 	// 获取访问令牌
@@ -57,7 +59,6 @@ func (d *CZK) List(ctx context.Context, dir model.Obj, args model.ListArgs) ([]m
 	url := fmt.Sprintf("https://pan.szczk.top/czkapi/list_files?folder_id=%s", dir.GetID())
 	resp, err := d.client.R().
 		SetHeader("Authorization", "Bearer "+d.AccessToken).
-		SetHeader("User-Agent", "openlist").
 		Get(url)
 
 	if err != nil {
@@ -150,7 +151,6 @@ func (d *CZK) Link(ctx context.Context, file model.Obj, args model.LinkArgs) (*m
 	url := fmt.Sprintf("https://pan.szczk.top/czkapi/get_download_url?file_id=%s", file.GetID())
 	resp, err := d.client.R().
 		SetHeader("Authorization", "Bearer "+d.AccessToken).
-		SetHeader("User-Agent", "openlist").
 		Get(url)
 
 	if err != nil {
@@ -199,13 +199,17 @@ func (d *CZK) Link(ctx context.Context, file model.Obj, args model.LinkArgs) (*m
 func (d *CZK) authenticate() error {
 	url := "https://pan.szczk.top/czkapi/authenticate"
 	
+	// 检查API密钥和密钥是否已设置
+	if d.APIKey == "" || d.APISecret == "" {
+		return fmt.Errorf("API key or secret not set")
+	}
+	
 	// 设置请求超时时间
 	d.client.SetTimeout(30 * time.Second)
 	
 	resp, err := d.client.R().
 		SetHeader("x-api-key", d.APIKey).
 		SetHeader("x-api-secret", d.APISecret).
-		SetHeader("User-Agent", "openlist").
 		Get(url)
 
 	if err != nil {
@@ -227,6 +231,16 @@ func (d *CZK) authenticate() error {
 		return fmt.Errorf("authentication API error: status=%d, message=%s", authResp.Status, authResp.Message)
 	}
 	
+	// 检查是否获得了必要的令牌
+	if authResp.Data.AccessToken == "" {
+		return fmt.Errorf("authentication succeeded but no access token returned")
+	}
+	
+	if authResp.Data.RefreshToken == "" {
+		return fmt.Errorf("authentication succeeded but no refresh token returned")
+	}
+	
+	// 更新令牌信息
 	d.AccessToken = authResp.Data.AccessToken
 	d.RefreshToken = authResp.Data.RefreshToken
 	d.ExpiresAt = time.Now().Add(time.Duration(authResp.Data.ExpiresIn) * time.Second)
@@ -236,13 +250,25 @@ func (d *CZK) authenticate() error {
 
 func (d *CZK) refreshTokenIfNeeded() error {
 	if time.Now().After(d.ExpiresAt) {
-		return d.refreshToken()
+		// 尝试刷新令牌
+		err := d.refreshToken()
+		if err != nil {
+			// 如果刷新令牌失败，尝试重新认证
+			log.Printf("Failed to refresh token: %v, attempting to re-authenticate", err)
+			return d.authenticate()
+		}
 	}
 	return nil
 }
 
 func (d *CZK) refreshToken() error {
 	url := "https://pan.szczk.top/czkapi/refresh_token"
+	
+	// 检查是否有有效的刷新令牌
+	if d.RefreshToken == "" {
+		// 如果没有刷新令牌，需要重新进行认证
+		return fmt.Errorf("no refresh token available, need to re-authenticate")
+	}
 	
 	// 创建表单数据
 	payload := &bytes.Buffer{}
@@ -258,7 +284,6 @@ func (d *CZK) refreshToken() error {
 	
 	resp, err := d.client.R().
 		SetHeader("Content-Type", writer.FormDataContentType()).
-		SetHeader("User-Agent", "openlist").
 		SetBody(payload.Bytes()).
 		Post(url)
 
@@ -276,13 +301,28 @@ func (d *CZK) refreshToken() error {
 		return fmt.Errorf("failed to parse refresh response: %w, response body: %s", err, string(resp.Body()))
 	}
 	
-	// 检查API返回的状态码
-	if refreshResp.Status != 200 {
-		return fmt.Errorf("token refresh API error: status=%d, message=%s", refreshResp.Status, refreshResp.Message)
+	// 检查API返回的状态码和成功标志
+	// 当Success为true且Status为200时，表示刷新成功
+	if !refreshResp.Success || refreshResp.Status != 200 {
+		// 特别处理"需要提供刷新令牌"的错误
+		if refreshResp.Message == "需要提供刷新令牌" {
+			return fmt.Errorf("token refresh API error: status=%d, success=%t, message=%s, refresh token may be invalid or expired", refreshResp.Status, refreshResp.Success, refreshResp.Message)
+		}
+		return fmt.Errorf("token refresh API error: status=%d, success=%t, message=%s", refreshResp.Status, refreshResp.Success, refreshResp.Message)
 	}
 	
+	// 更新访问令牌和过期时间
+	// 根据API文档，当Success为true且Status为200时
+	// Data.AccessToken会包含新令牌
+	// Data.ExpiresIn会显示新令牌有效期
+	// Data.TokenType会指定令牌类型(通常是"Bearer")
 	d.AccessToken = refreshResp.Data.AccessToken
 	d.ExpiresAt = time.Now().Add(time.Duration(refreshResp.Data.ExpiresIn) * time.Second)
+	
+	// 如果返回了新的刷新令牌，则更新它
+	if refreshResp.Data.RefreshToken != "" {
+		d.RefreshToken = refreshResp.Data.RefreshToken
+	}
 	
 	return nil
 }
@@ -308,7 +348,6 @@ func (d *CZK) MakeDir(ctx context.Context, parentDir model.Obj, dirName string) 
 	resp, err := d.client.R().
 		SetHeader("Authorization", "Bearer "+d.AccessToken).
 		SetHeader("Content-Type", writer.FormDataContentType()).
-		SetHeader("User-Agent", "openlist").
 		SetBody(payload.Bytes()).
 		Post(url)
 
@@ -375,7 +414,6 @@ func (d *CZK) Move(ctx context.Context, srcObj, dstDir model.Obj) (model.Obj, er
 	resp, err := d.client.R().
 		SetHeader("Authorization", "Bearer "+d.AccessToken).
 		SetHeader("Content-Type", writer.FormDataContentType()).
-		SetHeader("User-Agent", "openlist").
 		SetBody(payload.Bytes()).
 		Post(url)
 
@@ -442,7 +480,6 @@ func (d *CZK) Rename(ctx context.Context, srcObj model.Obj, newName string) (mod
 	resp, err := d.client.R().
 		SetHeader("Authorization", "Bearer "+d.AccessToken).
 		SetHeader("Content-Type", writer.FormDataContentType()).
-		SetHeader("User-Agent", "openlist").
 		SetBody(payload.Bytes()).
 		Post(url)
 
@@ -508,7 +545,6 @@ func (d *CZK) Remove(ctx context.Context, obj model.Obj) error {
 	resp, err := d.client.R().
 		SetHeader("Authorization", "Bearer "+d.AccessToken).
 		SetHeader("Content-Type", writer.FormDataContentType()).
-		SetHeader("User-Agent", "openlist").
 		SetBody(payload.Bytes()).
 		Post(url)
 
@@ -561,7 +597,6 @@ func (d *CZK) Put(ctx context.Context, dstDir model.Obj, file model.FileStreamer
 	resp, err := d.client.R().
 		SetHeader("Authorization", "Bearer "+d.AccessToken).
 		SetHeader("Content-Type", writer.FormDataContentType()).
-		SetHeader("User-Agent", "openlist").
 		SetBody(payload.Bytes()).
 		Post(initURL)
 
@@ -626,7 +661,6 @@ func (d *CZK) Put(ctx context.Context, dstDir model.Obj, file model.FileStreamer
 	completeResp, err := d.client.R().
 		SetHeader("Authorization", "Bearer "+d.AccessToken).
 		SetHeader("Content-Type", completeWriter.FormDataContentType()).
-		SetHeader("User-Agent", "openlist").
 		SetBody(completePayload.Bytes()).
 		Post(completeURL)
 

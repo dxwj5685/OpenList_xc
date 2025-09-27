@@ -18,6 +18,8 @@ type RefreshResp struct {
 		AccessToken string `json:"access_token"`
 		ExpiresIn   int64  `json:"expires_in"`
 		TokenType   string `json:"token_type"`
+		// 刷新令牌时可能返回新的刷新令牌
+		RefreshToken string `json:"refresh_token,omitempty"`
 	} `json:"data"`
 	FileID  string `json:"file_id,omitempty"`
 	Message string `json:"message"`
