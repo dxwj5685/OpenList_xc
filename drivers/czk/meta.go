@@ -12,7 +12,7 @@ type Addition struct {
 }
 
 var config = driver.Config{
-	Name:        "CZK",
+	Name:        "星辰云盘",
 	LocalSort:   false,
 	OnlyProxy:   false,
 	NoCache:     false,
