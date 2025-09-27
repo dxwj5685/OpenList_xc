@@ -35,15 +35,15 @@ func (d *CZK) GetAddition() driver.Additional {
 
 func (d *CZK) Init(ctx context.Context) error {
 	d.client = resty.New()
-	
+
 	// 设置全局User-Agent
 	d.client.SetHeader("User-Agent", "openlist")
-	
+
 	// 获取访问令牌
 	if err := d.authenticate(); err != nil {
 		return err
 	}
-	
+
 	return nil
 }
 
@@ -87,6 +87,7 @@ func (d *CZK) List(ctx context.Context, dir model.Obj, args model.ListArgs) ([]m
 	// 从响应中提取文件数据
 	var files []File
 	if data, ok := listResp["data"].(map[string]interface{}); ok {
+		// 检查files字段是否存在
 		if filesData, ok := data["files"].([]interface{}); ok {
 			for _, fileData := range filesData {
 				if fileMap, ok := fileData.(map[string]interface{}); ok {
@@ -111,6 +112,7 @@ func (d *CZK) List(ctx context.Context, dir model.Obj, args model.ListArgs) ([]m
 			}
 		}
 	}
+	// 如果没有files字段，可能是空文件夹，返回空列表
 
 	var objs []model.Obj
 	for _, file := range files {
@@ -129,7 +131,7 @@ func (d *CZK) List(ctx context.Context, dir model.Obj, args model.ListArgs) ([]m
 		} else {
 			modified = time.Now()
 		}
-		
+
 		objs = append(objs, &model.Object{
 			ID:       file.ID,
 			Name:     file.Name,
@@ -138,7 +140,7 @@ func (d *CZK) List(ctx context.Context, dir model.Obj, args model.ListArgs) ([]m
 			IsFolder: file.IsFolder,
 		})
 	}
-	
+
 	return objs, nil
 }
 
@@ -186,7 +188,7 @@ func (d *CZK) Link(ctx context.Context, file model.Obj, args model.LinkArgs) (*m
 			downloadLink = url
 		}
 	}
-	
+
 	if downloadLink == "" {
 		return nil, fmt.Errorf("failed to get download link from response")
 	}
@@ -198,15 +200,15 @@ func (d *CZK) Link(ctx context.Context, file model.Obj, args model.LinkArgs) (*m
 
 func (d *CZK) authenticate() error {
 	url := "https://pan.szczk.top/czkapi/authenticate"
-	
+
 	// 检查API密钥和密钥是否已设置
 	if d.APIKey == "" || d.APISecret == "" {
 		return fmt.Errorf("API key or secret not set")
 	}
-	
+
 	// 设置请求超时时间
 	d.client.SetTimeout(30 * time.Second)
-	
+
 	resp, err := d.client.R().
 		SetHeader("x-api-key", d.APIKey).
 		SetHeader("x-api-secret", d.APISecret).
@@ -225,26 +227,26 @@ func (d *CZK) authenticate() error {
 	if err := json.Unmarshal(resp.Body(), &authResp); err != nil {
 		return fmt.Errorf("failed to parse auth response: %w, response body: %s", err, string(resp.Body()))
 	}
-	
+
 	// 检查API返回的状态码
 	if authResp.Status != 200 {
 		return fmt.Errorf("authentication API error: status=%d, message=%s", authResp.Status, authResp.Message)
 	}
-	
+
 	// 检查是否获得了必要的令牌
 	if authResp.Data.AccessToken == "" {
 		return fmt.Errorf("authentication succeeded but no access token returned")
 	}
-	
+
 	if authResp.Data.RefreshToken == "" {
 		return fmt.Errorf("authentication succeeded but no refresh token returned")
 	}
-	
+
 	// 更新令牌信息
 	d.AccessToken = authResp.Data.AccessToken
 	d.RefreshToken = authResp.Data.RefreshToken
 	d.ExpiresAt = time.Now().Add(time.Duration(authResp.Data.ExpiresIn) * time.Second)
-	
+
 	return nil
 }
 
@@ -263,13 +265,13 @@ func (d *CZK) refreshTokenIfNeeded() error {
 
 func (d *CZK) refreshToken() error {
 	url := "https://pan.szczk.top/czkapi/refresh_token"
-	
+
 	// 检查是否有有效的刷新令牌
 	if d.RefreshToken == "" {
 		// 如果没有刷新令牌，需要重新进行认证
 		return fmt.Errorf("no refresh token available, need to re-authenticate")
 	}
-	
+
 	// 创建表单数据
 	payload := &bytes.Buffer{}
 	writer := multipart.NewWriter(payload)
@@ -281,7 +283,7 @@ func (d *CZK) refreshToken() error {
 
 	// 设置请求超时时间
 	d.client.SetTimeout(30 * time.Second)
-	
+
 	resp, err := d.client.R().
 		SetHeader("Content-Type", writer.FormDataContentType()).
 		SetBody(payload.Bytes()).
@@ -300,7 +302,7 @@ func (d *CZK) refreshToken() error {
 	if err := json.Unmarshal(resp.Body(), &refreshResp); err != nil {
 		return fmt.Errorf("failed to parse refresh response: %w, response body: %s", err, string(resp.Body()))
 	}
-	
+
 	// 检查API返回的状态码和成功标志
 	// 当Success为true且Status为200时，表示刷新成功
 	if !refreshResp.Success || refreshResp.Status != 200 {
@@ -310,7 +312,7 @@ func (d *CZK) refreshToken() error {
 		}
 		return fmt.Errorf("token refresh API error: status=%d, success=%t, message=%s", refreshResp.Status, refreshResp.Success, refreshResp.Message)
 	}
-	
+
 	// 更新访问令牌和过期时间
 	// 根据API文档，当Success为true且Status为200时
 	// Data.AccessToken会包含新令牌
@@ -318,12 +320,12 @@ func (d *CZK) refreshToken() error {
 	// Data.TokenType会指定令牌类型(通常是"Bearer")
 	d.AccessToken = refreshResp.Data.AccessToken
 	d.ExpiresAt = time.Now().Add(time.Duration(refreshResp.Data.ExpiresIn) * time.Second)
-	
+
 	// 如果返回了新的刷新令牌，则更新它
 	if refreshResp.Data.RefreshToken != "" {
 		d.RefreshToken = refreshResp.Data.RefreshToken
 	}
-	
+
 	return nil
 }
 
@@ -334,7 +336,7 @@ func (d *CZK) MakeDir(ctx context.Context, parentDir model.Obj, dirName string) 
 	}
 
 	url := "https://pan.szczk.top/czkapi/create_folder"
-	
+
 	// 创建表单数据
 	payload := &bytes.Buffer{}
 	writer := multipart.NewWriter(payload)
@@ -384,7 +386,7 @@ func (d *CZK) MakeDir(ctx context.Context, parentDir model.Obj, dirName string) 
 		Modified: time.Now(),
 		IsFolder: true,
 	}
-	
+
 	return newObj, nil
 }
 
@@ -394,7 +396,7 @@ func (d *CZK) Move(ctx context.Context, srcObj, dstDir model.Obj) (model.Obj, er
 	}
 
 	url := "https://pan.szczk.top/czkapi/move_item"
-	
+
 	// 创建表单数据，根据API示例使用正确的参数名
 	payload := &bytes.Buffer{}
 	writer := multipart.NewWriter(payload)
@@ -450,7 +452,7 @@ func (d *CZK) Move(ctx context.Context, srcObj, dstDir model.Obj) (model.Obj, er
 		Modified: time.Now(),
 		IsFolder: srcObj.IsDir(),
 	}
-	
+
 	return newObj, nil
 }
 
@@ -460,7 +462,7 @@ func (d *CZK) Rename(ctx context.Context, srcObj model.Obj, newName string) (mod
 	}
 
 	url := "https://pan.szczk.top/czkapi/rename_item"
-	
+
 	// 创建表单数据
 	payload := &bytes.Buffer{}
 	writer := multipart.NewWriter(payload)
@@ -516,7 +518,7 @@ func (d *CZK) Rename(ctx context.Context, srcObj model.Obj, newName string) (mod
 		Modified: time.Now(),
 		IsFolder: srcObj.IsDir(),
 	}
-	
+
 	return newObj, nil
 }
 
@@ -526,7 +528,7 @@ func (d *CZK) Remove(ctx context.Context, obj model.Obj) error {
 	}
 
 	url := "https://pan.szczk.top/czkapi/delete_item"
-	
+
 	// 创建表单数据
 	payload := &bytes.Buffer{}
 	writer := multipart.NewWriter(payload)
@@ -581,7 +583,7 @@ func (d *CZK) Put(ctx context.Context, dstDir model.Obj, file model.FileStreamer
 
 	// 初始化上传
 	initURL := "https://pan.szczk.top/czkapi/first_upload"
-	
+
 	// 创建表单数据
 	payload := &bytes.Buffer{}
 	writer := multipart.NewWriter(payload)
@@ -626,7 +628,7 @@ func (d *CZK) Put(ctx context.Context, dstDir model.Obj, file model.FileStreamer
 	// 从初始化响应中提取需要的参数
 	csrfToken := ""
 	fileKey := ""
-	
+
 	if data, ok := initResp["data"].(map[string]interface{}); ok {
 		if token, ok := data["csrf_token"].(string); ok {
 			csrfToken = token
@@ -643,7 +645,7 @@ func (d *CZK) Put(ctx context.Context, dstDir model.Obj, file model.FileStreamer
 
 	// 完成上传
 	completeURL := "https://pan.szczk.top/czkapi/ok_upload"
-	
+
 	// 创建完成上传的表单数据
 	completePayload := &bytes.Buffer{}
 	completeWriter := multipart.NewWriter(completePayload)
@@ -695,7 +697,7 @@ func (d *CZK) Put(ctx context.Context, dstDir model.Obj, file model.FileStreamer
 		Modified: time.Now(),
 		IsFolder: false,
 	}
-	
+
 	return newObj, nil
 }
 
