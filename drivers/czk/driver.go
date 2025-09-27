@@ -65,7 +65,9 @@ func (d *CZK) List(ctx context.Context, dir model.Obj, args model.ListArgs) ([]m
 		return nil, fmt.Errorf("failed to list files: %s", resp.String())
 	}
 
-	// 解析响应并返回文件列表
+	// 解析响应并返回文件列表resp, err := d.client.R().
+    SetHeader("Authorization", "Bearer "+d.AccessToken).
+    Get(url)
 	var listResp map[string]interface{}
 	if err := json.Unmarshal(resp.Body(), &listResp); err != nil {
 		return nil, fmt.Errorf("failed to parse file list response: %w", err)
@@ -130,9 +132,14 @@ func (d *CZK) List(ctx context.Context, dir model.Obj, args model.ListArgs) ([]m
 }
 
 func (d *CZK) Link(ctx context.Context, file model.Obj, args model.LinkArgs) (*model.Link, error) {
-	// 注意：根据API示例，获取下载链接不需要认证头部
+	if err := d.refreshTokenIfNeeded(); err != nil {
+		return nil, err
+	}
+
+	// 根据最新反馈，下载链接接口需要添加Authorization认证头部
 	url := fmt.Sprintf("https://pan.szczk.top/czkapi/get_download_url?file_id=%s", file.GetID())
 	resp, err := d.client.R().
+		SetHeader("Authorization", "Bearer "+d.AccessToken).
 		Get(url)
 
 	if err != nil {
