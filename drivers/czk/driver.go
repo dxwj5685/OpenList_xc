@@ -678,6 +678,9 @@ func (d *CZK) Put(ctx context.Context, dstDir model.Obj, file model.FileStreamer
 		return nil, fmt.Errorf("failed to refresh token: %w", err)
 	}
 
+	// 增加请求超时时间以提高大文件上传的稳定性
+	d.client.SetTimeout(10 * time.Minute)
+
 	// 使用OpenList提供的工具函数计算文件的MD5哈希值
 	tempFile, md5Hash, err := stream.CacheFullAndHash(file, &up, utils.MD5)
 	if err != nil {
@@ -713,16 +716,22 @@ func (d *CZK) Put(ctx context.Context, dstDir model.Obj, file model.FileStreamer
 		Post(initURL)
 
 	if err != nil {
+		// 恢复默认超时时间
+		d.client.SetTimeout(30 * time.Second)
 		return nil, fmt.Errorf("failed to send init upload request: %w", err)
 	}
 
 	if resp.StatusCode() != http.StatusOK {
+		// 恢复默认超时时间
+		d.client.SetTimeout(30 * time.Second)
 		return nil, fmt.Errorf("failed to initialize upload with status %d: %s", resp.StatusCode(), resp.String())
 	}
 
 	// 解析初始化上传的响应
 	var initResp map[string]interface{}
 	if err := json.Unmarshal(resp.Body(), &initResp); err != nil {
+		// 恢复默认超时时间
+		d.client.SetTimeout(30 * time.Second)
 		return nil, fmt.Errorf("failed to parse upload init response: %w", err)
 	}
 
@@ -733,6 +742,8 @@ func (d *CZK) Put(ctx context.Context, dstDir model.Obj, file model.FileStreamer
 			// 根据API文档，使用msg字段而非message字段
 			message = msg
 		}
+		// 恢复默认超时时间
+		d.client.SetTimeout(30 * time.Second)
 		return nil, fmt.Errorf("init upload API error: code=%d, message=%s", int64(code), message)
 	}
 
@@ -751,6 +762,8 @@ func (d *CZK) Put(ctx context.Context, dstDir model.Obj, file model.FileStreamer
 
 	// 检查必要参数是否存在
 	if csrfToken == "" || fileKey == "" {
+		// 恢复默认超时时间
+		d.client.SetTimeout(30 * time.Second)
 		return nil, fmt.Errorf("missing required parameters from init upload response: csrf_token=%s, file_key=%s", csrfToken, fileKey)
 	}
 
@@ -768,6 +781,8 @@ func (d *CZK) Put(ctx context.Context, dstDir model.Obj, file model.FileStreamer
 	_ = completeWriter.WriteField("folder", dstDir.GetID())
 	err = completeWriter.Close()
 	if err != nil {
+		// 恢复默认超时时间
+		d.client.SetTimeout(30 * time.Second)
 		return nil, fmt.Errorf("failed to create complete upload form: %w", err)
 	}
 
@@ -776,6 +791,9 @@ func (d *CZK) Put(ctx context.Context, dstDir model.Obj, file model.FileStreamer
 		SetHeader("Content-Type", completeWriter.FormDataContentType()).
 		SetBody(completePayload.Bytes()).
 		Post(completeURL)
+
+	// 恢复默认超时时间
+	d.client.SetTimeout(30 * time.Second)
 
 	if err != nil {
 		return nil, fmt.Errorf("failed to send complete upload request: %w", err)
