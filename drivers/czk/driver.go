@@ -9,6 +9,8 @@ import (
 	"log"
 	"mime/multipart"
 	"net/http"
+	"net/url"
+	"strings"
 	"time"
 
 	"github.com/OpenListTeam/OpenList/v4/internal/driver"
@@ -60,10 +62,10 @@ func (d *CZK) List(ctx context.Context, dir model.Obj, args model.ListArgs) ([]m
 	}
 
 	// 根据API文档，文件列表接口需要在URL中包含folder_id参数，并在请求头中携带Authorization
-	url := fmt.Sprintf("https://pan.szczk.top/czkapi/list_files?folder_id=%s", dir.GetID())
+	listURL := fmt.Sprintf("https://pan.szczk.top/czkapi/list_files?folder_id=%s", dir.GetID())
 	resp, err := d.client.R().
 		SetHeader("Authorization", "Bearer "+d.AccessToken).
-		Get(url)
+		Get(listURL)
 
 	if err != nil {
 		return nil, fmt.Errorf("failed to send list request: %w", err)
@@ -171,10 +173,10 @@ func (d *CZK) Link(ctx context.Context, file model.Obj, args model.LinkArgs) (*m
 	}
 
 	// 根据API文档，下载链接接口需要添加Authorization认证头部
-	url := fmt.Sprintf("https://pan.szczk.top/czkapi/get_download_url?file_id=%s", file.GetID())
+	downloadURL := fmt.Sprintf("https://pan.szczk.top/czkapi/get_download_url?file_id=%s", file.GetID())
 	resp, err := d.client.R().
 		SetHeader("Authorization", "Bearer "+d.AccessToken).
-		Get(url)
+		Get(downloadURL)
 
 	if err != nil {
 		return nil, fmt.Errorf("failed to send get download link request: %w", err)
@@ -195,12 +197,12 @@ func (d *CZK) Link(ctx context.Context, file model.Obj, args model.LinkArgs) (*m
 	log.Printf("CZK Link response: %+v", downloadResp)
 
 	// 检查响应中是否有错误信息
-	if status, ok := downloadResp["status"].(float64); ok && int64(status) != 200 {
+	if code, ok := downloadResp["code"].(float64); ok && int64(code) != 200 {
 		message := "unknown error"
 		if msg, ok := downloadResp["message"].(string); ok {
 			message = msg
 		}
-		return nil, fmt.Errorf("get download link API error: status=%d, message=%s", int64(status), message)
+		return nil, fmt.Errorf("get download link API error: code=%d, message=%s", int64(code), message)
 	}
 
 	// 从响应中提取下载链接
@@ -221,16 +223,45 @@ func (d *CZK) Link(ctx context.Context, file model.Obj, args model.LinkArgs) (*m
 	}
 
 	// 创建一个带有重试机制的链接
-	return &model.Link{
+	link := &model.Link{
 		URL: downloadLink,
 		Header: http.Header{
 			"User-Agent": []string{"openlist"},
 		},
-	}, nil
+	}
+
+	// 如果是S3兼容链接，需要添加认证信息
+	if d.isS3CompatibleURL(downloadLink) {
+		// 解析URL中的查询参数
+		parsedURL, err := url.Parse(downloadLink)
+		if err != nil {
+			log.Printf("CZK Link: failed to parse S3 URL: %v", err)
+		} else {
+			// 将查询参数添加到请求头中
+			queryParams := parsedURL.Query()
+			for key, values := range queryParams {
+				if strings.HasPrefix(key, "X-Amz-") {
+					for _, value := range values {
+						link.Header.Add(key, value)
+					}
+				}
+			}
+		}
+	}
+
+	return link, nil
+}
+
+// isS3CompatibleURL 检查URL是否为S3兼容格式
+func (d *CZK) isS3CompatibleURL(urlStr string) bool {
+	// 检查URL是否包含S3相关的特征
+	return strings.Contains(urlStr, "X-Amz-") ||
+		strings.Contains(urlStr, "s3") ||
+		strings.Contains(urlStr, "amazonaws.com")
 }
 
 func (d *CZK) authenticate() error {
-	url := "https://pan.szczk.top/czkapi/authenticate"
+	authURL := "https://pan.szczk.top/czkapi/authenticate"
 
 	// 检查API密钥和密钥是否已设置
 	if d.APIKey == "" || d.APISecret == "" {
@@ -244,7 +275,7 @@ func (d *CZK) authenticate() error {
 	resp, err := d.client.R().
 		SetHeader("x-api-key", d.APIKey).
 		SetHeader("x-api-secret", d.APISecret).
-		Get(url)
+		Get(authURL)
 
 	if err != nil {
 		return fmt.Errorf("failed to send auth request: %w", err)
@@ -308,7 +339,7 @@ func (d *CZK) refreshTokenIfNeeded() error {
 }
 
 func (d *CZK) refreshToken() error {
-	url := "https://pan.szczk.top/czkapi/refresh_token"
+	refreshURL := "https://pan.szczk.top/czkapi/refresh_token"
 
 	// 检查是否有有效的刷新令牌
 	if d.RefreshToken == "" {
@@ -334,7 +365,7 @@ func (d *CZK) refreshToken() error {
 	resp, err := d.client.R().
 		SetHeader("Content-Type", writer.FormDataContentType()).
 		SetBody(payload.Bytes()).
-		Post(url)
+		Post(refreshURL)
 
 	if err != nil {
 		return fmt.Errorf("failed to send refresh request: %w", err)
@@ -390,7 +421,7 @@ func (d *CZK) MakeDir(ctx context.Context, parentDir model.Obj, dirName string) 
 		return nil, fmt.Errorf("failed to refresh token: %w", err)
 	}
 
-	url := "https://pan.szczk.top/czkapi/create_folder"
+	mkdirURL := "https://pan.szczk.top/czkapi/create_folder"
 
 	// 创建表单数据
 	payload := &bytes.Buffer{}
@@ -406,7 +437,7 @@ func (d *CZK) MakeDir(ctx context.Context, parentDir model.Obj, dirName string) 
 		SetHeader("Authorization", "Bearer "+d.AccessToken).
 		SetHeader("Content-Type", writer.FormDataContentType()).
 		SetBody(payload.Bytes()).
-		Post(url)
+		Post(mkdirURL)
 
 	if err != nil {
 		return nil, fmt.Errorf("failed to send mkdir request: %w", err)
@@ -458,7 +489,7 @@ func (d *CZK) Move(ctx context.Context, srcObj, dstDir model.Obj) (model.Obj, er
 		return nil, fmt.Errorf("failed to refresh token: %w", err)
 	}
 
-	url := "https://pan.szczk.top/czkapi/move_item"
+	moveURL := "https://pan.szczk.top/czkapi/move_item"
 
 	// 创建表单数据，根据API示例使用正确的参数名
 	payload := &bytes.Buffer{}
@@ -482,7 +513,7 @@ func (d *CZK) Move(ctx context.Context, srcObj, dstDir model.Obj) (model.Obj, er
 		SetHeader("Authorization", "Bearer "+d.AccessToken).
 		SetHeader("Content-Type", writer.FormDataContentType()).
 		SetBody(payload.Bytes()).
-		Post(url)
+		Post(moveURL)
 
 	if err != nil {
 		return nil, fmt.Errorf("failed to send move request: %w", err)
@@ -557,7 +588,7 @@ func (d *CZK) Rename(ctx context.Context, srcObj model.Obj, newName string) (mod
 		return nil, fmt.Errorf("failed to refresh token: %w", err)
 	}
 
-	url := "https://pan.szczk.top/czkapi/rename_item"
+	renameURL := "https://pan.szczk.top/czkapi/rename_item"
 
 	// 创建表单数据
 	payload := &bytes.Buffer{}
@@ -579,7 +610,7 @@ func (d *CZK) Rename(ctx context.Context, srcObj model.Obj, newName string) (mod
 		SetHeader("Authorization", "Bearer "+d.AccessToken).
 		SetHeader("Content-Type", writer.FormDataContentType()).
 		SetBody(payload.Bytes()).
-		Post(url)
+		Post(renameURL)
 
 	if err != nil {
 		return nil, fmt.Errorf("failed to send rename request: %w", err)
@@ -623,7 +654,7 @@ func (d *CZK) Remove(ctx context.Context, obj model.Obj) error {
 		return fmt.Errorf("failed to refresh token: %w", err)
 	}
 
-	url := "https://pan.szczk.top/czkapi/delete_item"
+	removeURL := "https://pan.szczk.top/czkapi/delete_item"
 
 	// 创建表单数据
 	payload := &bytes.Buffer{}
@@ -644,7 +675,7 @@ func (d *CZK) Remove(ctx context.Context, obj model.Obj) error {
 		SetHeader("Authorization", "Bearer "+d.AccessToken).
 		SetHeader("Content-Type", writer.FormDataContentType()).
 		SetBody(payload.Bytes()).
-		Post(url)
+		Post(removeURL)
 
 	if err != nil {
 		return fmt.Errorf("failed to send delete request: %w", err)
@@ -695,7 +726,7 @@ func (d *CZK) Put(ctx context.Context, dstDir model.Obj, file model.FileStreamer
 	}
 
 	// 初始化上传
-	initURL := "https://pan.szczk.top/czkapi/first_upload"
+	initUploadURL := "https://pan.szczk.top/czkapi/first_upload"
 
 	// 创建表单数据
 	payload := &bytes.Buffer{}
@@ -710,13 +741,13 @@ func (d *CZK) Put(ctx context.Context, dstDir model.Obj, file model.FileStreamer
 	}
 
 	log.Printf("CZK Put init upload request - URL: %s, filename: %s, filesize: %d, hash: %s, folder: %s",
-		initURL, file.GetName(), file.GetSize(), md5Hash, dstDir.GetID())
+		initUploadURL, file.GetName(), file.GetSize(), md5Hash, dstDir.GetID())
 
 	resp, err := d.client.R().
 		SetHeader("Authorization", "Bearer "+d.AccessToken).
 		SetHeader("Content-Type", writer.FormDataContentType()).
 		SetBody(payload.Bytes()).
-		Post(initURL)
+		Post(initUploadURL)
 
 	if err != nil {
 		// 恢复默认超时时间
@@ -793,8 +824,20 @@ func (d *CZK) Put(ctx context.Context, dstDir model.Obj, file model.FileStreamer
 			}
 		}
 
+		// 获取文件大小以设置Content-Length头部
+		var contentLength int64
+		if seeker, ok := tempFile.(io.Seeker); ok {
+			curPos, _ := seeker.Seek(0, io.SeekCurrent)
+			endPos, _ := seeker.Seek(0, io.SeekEnd)
+			contentLength = endPos
+			seeker.Seek(curPos, io.SeekStart) // 恢复当前位置
+		} else {
+			contentLength = file.GetSize()
+		}
+
 		// 上传文件到指定的URL
 		uploadResp, err := d.client.R().
+			SetHeader("Content-Length", fmt.Sprintf("%d", contentLength)).
 			SetBody(tempFile).
 			Put(uploadURL)
 
@@ -840,7 +883,6 @@ func (d *CZK) Put(ctx context.Context, dstDir model.Obj, file model.FileStreamer
 		SetHeader("Content-Type", completeWriter.FormDataContentType()).
 		SetBody(completePayload.Bytes()).
 		Post(completeURL)
-
 	// 恢复默认超时时间
 	d.client.SetTimeout(30 * time.Second)
 
