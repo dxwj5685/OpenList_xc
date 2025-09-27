@@ -223,29 +223,49 @@ func (d *CZK) authenticate() error {
 	}
 
 	// 解析认证响应，获取access_token, refresh_token等
-	var authResp AuthResp
+	var authResp map[string]interface{}
 	if err := json.Unmarshal(resp.Body(), &authResp); err != nil {
 		return fmt.Errorf("failed to parse auth response: %w, response body: %s", err, string(resp.Body()))
 	}
 
 	// 检查API返回的状态码
-	if authResp.Status != 200 {
-		return fmt.Errorf("authentication API error: status=%d, message=%s", authResp.Status, authResp.Message)
+	status, ok := authResp["status"].(float64)
+	if !ok {
+		return fmt.Errorf("authentication API error: unexpected response format, status field missing or invalid")
+	}
+
+	message, _ := authResp["message"].(string)
+
+	// 即使status为0，如果message是"认证成功"，我们也认为认证成功
+	if status != 200 && message != "认证成功" {
+		return fmt.Errorf("authentication API error: status=%.0f, message=%s", status, message)
 	}
 
 	// 检查是否获得了必要的令牌
-	if authResp.Data.AccessToken == "" {
+	data, ok := authResp["data"].(map[string]interface{})
+	if !ok {
+		return fmt.Errorf("authentication succeeded but no data returned")
+	}
+
+	accessToken, ok := data["access_token"].(string)
+	if !ok || accessToken == "" {
 		return fmt.Errorf("authentication succeeded but no access token returned")
 	}
 
-	if authResp.Data.RefreshToken == "" {
+	refreshToken, ok := data["refresh_token"].(string)
+	if !ok || refreshToken == "" {
 		return fmt.Errorf("authentication succeeded but no refresh token returned")
 	}
 
+	expiresIn, ok := data["expires_in"].(float64)
+	if !ok {
+		return fmt.Errorf("authentication succeeded but no expires_in returned")
+	}
+
 	// 更新令牌信息
-	d.AccessToken = authResp.Data.AccessToken
-	d.RefreshToken = authResp.Data.RefreshToken
-	d.ExpiresAt = time.Now().Add(time.Duration(authResp.Data.ExpiresIn) * time.Second)
+	d.AccessToken = accessToken
+	d.RefreshToken = refreshToken
+	d.ExpiresAt = time.Now().Add(time.Duration(expiresIn) * time.Second)
 
 	return nil
 }
