@@ -517,10 +517,9 @@ func (d *CZK) Move(ctx context.Context, srcObj, dstDir model.Obj) (model.Obj, er
 							newObj.Name = name
 						}
 
-						if parentId, ok := itemMap["parent_id"].(float64); ok {
-							// parentId 是新的父目录ID，但模型中没有直接存储这个信息
-							// 我们只需要确保对象信息是最新的
-						}
+						// parentId 是新的父目录ID，但模型中没有直接存储这个信息
+						// 我们只需要确保对象信息是最新的
+						_ = itemMap["parent_id"]
 
 						if createdAt, ok := itemMap["created_at"].(string); ok {
 							if t, err := time.Parse("2006-01-02 15:04:05", createdAt); err == nil {
