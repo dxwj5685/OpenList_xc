@@ -81,69 +81,81 @@ func (d *CZK) List(ctx context.Context, dir model.Obj, args model.ListArgs) ([]m
 	log.Printf("CZK List response: %+v", listResp)
 
 	// 检查响应中是否有错误信息
-	if status, ok := listResp["status"].(float64); ok && int64(status) != 200 {
+	if code, ok := listResp["code"].(float64); ok && int64(code) != 200 {
 		message := "unknown error"
 		if msg, ok := listResp["message"].(string); ok {
 			message = msg
 		}
-		return nil, fmt.Errorf("list files API error: status=%d, message=%s", int64(status), message)
+		return nil, fmt.Errorf("list files API error: code=%d, message=%s", int64(code), message)
 	}
 
 	// 从响应中提取文件数据
-	var files []File
+	var objs []model.Obj
+
+	// 根据API示例，正确的结构是 {code, message, data: {items: [], total_count}}
 	if data, ok := listResp["data"].(map[string]interface{}); ok {
-		// 检查files字段是否存在
-		if filesData, ok := data["files"].([]interface{}); ok {
-			for _, fileData := range filesData {
-				if fileMap, ok := fileData.(map[string]interface{}); ok {
-					file := File{}
-					if id, ok := fileMap["id"].(string); ok {
-						file.ID = id
+		if items, ok := data["items"].([]interface{}); ok {
+			for _, itemData := range items {
+				if itemMap, ok := itemData.(map[string]interface{}); ok {
+					// 解析文件/文件夹信息
+					id := ""
+					if itemId, ok := itemMap["id"].(float64); ok {
+						id = fmt.Sprintf("%.0f", itemId) // ID是数字，转换为字符串
 					}
-					if name, ok := fileMap["name"].(string); ok {
-						file.Name = name
+
+					name := ""
+					if itemName, ok := itemMap["name"].(string); ok {
+						name = itemName
 					}
-					if size, ok := fileMap["size"].(float64); ok {
-						file.Size = int64(size)
+
+					size := int64(0)
+					if itemSize, ok := itemMap["size"].(float64); ok {
+						size = int64(itemSize)
 					}
-					if modified, ok := fileMap["modified"].(string); ok {
-						file.Modified = modified
+
+					isFolder := false
+					if itemType, ok := itemMap["type"].(string); ok {
+						isFolder = (itemType == "folder")
 					}
-					if isFolder, ok := fileMap["is_folder"].(bool); ok {
-						file.IsFolder = isFolder
+
+					// 解析时间
+					modifiedStr := ""
+					if isFolder {
+						if createdAt, ok := itemMap["created_at"].(string); ok {
+							modifiedStr = createdAt
+						}
+					} else {
+						if uploadedAt, ok := itemMap["uploaded_at"].(string); ok {
+							modifiedStr = uploadedAt
+						}
 					}
-					files = append(files, file)
+
+					// 解析修改时间
+					var modified time.Time
+					if modifiedStr != "" {
+						// 尝试解析时间格式 "2025-06-29 15:37:01"
+						if t, err := time.Parse("2006-01-02 15:04:05", modifiedStr); err == nil {
+							modified = t
+						} else {
+							// 如果解析失败，使用当前时间
+							modified = time.Now()
+						}
+					} else {
+						modified = time.Now()
+					}
+
+					obj := &model.Object{
+						ID:       id,
+						Name:     name,
+						Size:     size,
+						Modified: modified,
+						IsFolder: isFolder,
+					}
+
+					objs = append(objs, obj)
 				}
 			}
 		}
-	}
-	// 如果没有files字段，可能是空文件夹，返回空列表
-
-	var objs []model.Obj
-	for _, file := range files {
-		// 解析文件修改时间
-		var modified time.Time
-		if file.Modified != "" {
-			// 尝试几种常见的时间格式
-			if t, err := time.Parse(time.RFC3339, file.Modified); err == nil {
-				modified = t
-			} else if t, err := time.Parse("2006-01-02 15:04:05", file.Modified); err == nil {
-				modified = t
-			} else {
-				// 如果解析失败，使用当前时间
-				modified = time.Now()
-			}
-		} else {
-			modified = time.Now()
-		}
-
-		objs = append(objs, &model.Object{
-			ID:       file.ID,
-			Name:     file.Name,
-			Size:     file.Size,
-			Modified: modified,
-			IsFolder: file.IsFolder,
-		})
 	}
 
 	log.Printf("CZK List: successfully listed %d files", len(objs))
