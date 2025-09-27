@@ -65,7 +65,7 @@ func (d *CZK) List(ctx context.Context, dir model.Obj, args model.ListArgs) ([]m
 		return nil, fmt.Errorf("failed to list files: %s", resp.String())
 	}
 
-	// 解析响应并返回文件列表
+	// 解析响应并返回文件列�?
 	var listResp map[string]interface{}
 	if err := json.Unmarshal(resp.Body(), &listResp); err != nil {
 		return nil, fmt.Errorf("failed to parse file list response: %w", err)
@@ -104,13 +104,13 @@ func (d *CZK) List(ctx context.Context, dir model.Obj, args model.ListArgs) ([]m
 		// 解析文件修改时间
 		var modified time.Time
 		if file.Modified != "" {
-			// 尝试几种常见的时间格式
+			// 尝试几种常见的时间格�?
 			if t, err := time.Parse(time.RFC3339, file.Modified); err == nil {
 				modified = t
 			} else if t, err := time.Parse("2006-01-02 15:04:05", file.Modified); err == nil {
 				modified = t
 			} else {
-				// 如果解析失败，使用当前时间
+				// 如果解析失败，使用当前时�?
 				modified = time.Now()
 			}
 		} else {
@@ -148,7 +148,7 @@ func (d *CZK) Link(ctx context.Context, file model.Obj, args model.LinkArgs) (*m
 		return nil, fmt.Errorf("failed to get download link: %s", resp.String())
 	}
 
-	// 解析响应并返回下载链接
+	// 解析响应并返回下载链�?
 	var downloadResp map[string]interface{}
 	if err := json.Unmarshal(resp.Body(), &downloadResp); err != nil {
 		return nil, fmt.Errorf("failed to parse download link response: %w", err)
@@ -157,7 +157,7 @@ func (d *CZK) Link(ctx context.Context, file model.Obj, args model.LinkArgs) (*m
 	// 从响应中提取下载链接
 	var downloadLink string
 	if data, ok := downloadResp["data"].(map[string]interface{}); ok {
-		// 尝试从不同字段获取下载链接
+		// 尝试从不同字段获取下载链�?
 		if link, ok := data["download_link"].(string); ok && link != "" {
 			downloadLink = link
 		} else if url, ok := data["url"].(string); ok && url != "" {
@@ -189,7 +189,7 @@ func (d *CZK) authenticate() error {
 		return fmt.Errorf("authentication failed: %s", resp.String())
 	}
 
-	// 解析认证响应，获取access_token, refresh_token等
+	// 解析认证响应，获取access_token, refresh_token�?
 	var authResp AuthResp
 	if err := json.Unmarshal(resp.Body(), &authResp); err != nil {
 		return fmt.Errorf("failed to parse auth response: %w", err)
@@ -234,7 +234,7 @@ func (d *CZK) refreshToken() error {
 		return fmt.Errorf("token refresh failed: %s", resp.String())
 	}
 
-	// 解析刷新令牌响应，更新access_token等
+	// 解析刷新令牌响应，更新access_token�?
 	var refreshResp RefreshResp
 	if err := json.Unmarshal(resp.Body(), &refreshResp); err != nil {
 		return fmt.Errorf("failed to parse refresh response: %w", err)
@@ -246,7 +246,7 @@ func (d *CZK) refreshToken() error {
 	return nil
 }
 
-// 以下方法为可选实现
+// 以下方法为可选实�?
 func (d *CZK) MakeDir(ctx context.Context, parentDir model.Obj, dirName string) (model.Obj, error) {
 	if err := d.refreshTokenIfNeeded(); err != nil {
 		return nil, err
@@ -285,7 +285,7 @@ func (d *CZK) MakeDir(ctx context.Context, parentDir model.Obj, dirName string) 
 	}
 
 	// 返回新创建的目录对象
-	// 注意：这里应该根据实际API响应来构建对象
+	// 注意：这里应该根据实际API响应来构建对�?
 	// 目前我们创建一个基本的对象
 	newObj := &model.Object{
 		ID:       "", // 应该从响应中获取实际ID
@@ -342,8 +342,8 @@ func (d *CZK) Move(ctx context.Context, srcObj, dstDir model.Obj) (model.Obj, er
 	}
 
 	// 返回更新后的对象
-	// 注意：这里应该根据实际API响应来构建对象
-	// 目前我们简单地复制原对象并更新父目录
+	// 注意：这里应该根据实际API响应来构建对�?
+	// 目前我们简单地复制原对象并更新父目�?
 	newObj := &model.Object{
 		ID:       srcObj.GetID(),
 		Name:     srcObj.GetName(),
@@ -399,7 +399,7 @@ func (d *CZK) Rename(ctx context.Context, srcObj model.Obj, newName string) (mod
 	}
 
 	// 返回更新后的对象
-	// 注意：这里应该根据实际API响应来构建对象
+	// 注意：这里应该根据实际API响应来构建对�?
 	// 目前我们简单地复制原对象并更新名称
 	newObj := &model.Object{
 		ID:       srcObj.GetID(),
@@ -414,7 +414,7 @@ func (d *CZK) Rename(ctx context.Context, srcObj model.Obj, newName string) (mod
 
 func (d *CZK) Copy(ctx context.Context, srcObj, dstDir model.Obj) (model.Obj, error) {
 	// 如果API支持复制功能，可以在这里实现
-	// 目前返回未实现错误
+	// 目前返回未实现错�?
 	return nil, errs.NotImplement
 }
 
@@ -468,7 +468,7 @@ func (d *CZK) Put(ctx context.Context, dstDir model.Obj, file model.FileStreamer
 		return nil, err
 	}
 
-	// 初始化上传
+	// 初始化上�?
 	initURL := "https://pan.szczk.top/czkapi/first_upload"
 	
 	// 创建表单数据
@@ -504,12 +504,12 @@ func (d *CZK) Put(ctx context.Context, dstDir model.Obj, file model.FileStreamer
 	}
 
 	// 从初始化响应中提取需要的参数
-	// 这里应该根据实际API响应来提取csrf_token和file_key等参数
+	// 这里应该根据实际API响应来提取csrf_token和file_key等参�?
 
 	// 完成上传
 	completeURL := "https://pan.szczk.top/czkapi/ok_upload"
 	
-	// 创建完成上传的表单数据
+	// 创建完成上传的表单数�?
 	completePayload := &bytes.Buffer{}
 	completeWriter := multipart.NewWriter(completePayload)
 	_ = completeWriter.WriteField("hash", "") // 简化处理，实际应使用文件hash
@@ -537,7 +537,7 @@ func (d *CZK) Put(ctx context.Context, dstDir model.Obj, file model.FileStreamer
 		return nil, fmt.Errorf("failed to complete upload: %s", completeResp.String())
 	}
 
-	// 解析完成上传的响应
+	// 解析完成上传的响�?
 	var completeRespData map[string]interface{}
 	if err := json.Unmarshal(completeResp.Body(), &completeRespData); err != nil {
 		return nil, fmt.Errorf("failed to parse upload complete response: %w", err)
@@ -577,7 +577,7 @@ func (d *CZK) GetDetails(ctx context.Context) (*model.StorageDetails, error) {
 
 var _ driver.Driver = (*CZK)(nil)
 
-// getStringValue 从interface{}中安全地提取字符串值
+// getStringValue 从interface{}中安全地提取字符串�?
 func getStringValue(val interface{}) string {
 	if str, ok := val.(string); ok {
 		return str
