@@ -10,6 +10,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 
@@ -20,6 +21,9 @@ import (
 	"github.com/OpenListTeam/OpenList/v4/pkg/utils"
 	"github.com/go-resty/resty/v2"
 )
+
+// 新增：校验filesize是否为纯数字字符串的正则
+var filesizeRegex = regexp.MustCompile(`^\d+$`)
 
 type CZK struct {
 	model.Storage
@@ -247,9 +251,9 @@ func (d *CZK) Link(ctx context.Context, file model.Obj, args model.LinkArgs) (*m
 
 	// 8. 新增：S3链接时效性校验（提前预警即将过期的链接）
 	if expiresStr := linkHeader.Get("X-Amz-Expires"); expiresStr != "" {
-		expiresSec, err := time.ParseDuration(expiresStr + "s")
-		if err == nil && expiresSec < 60*time.Second { // 剩余有效期<60秒则预警
-			log.Printf("CZK Link: warning - download link expires soon (in %v), link: %s", expiresSec, cleanedLink)
+		expires, err := time.ParseDuration(expiresStr + "s")
+		if err == nil && expires < 60*time.Second { // 剩余有效期<60秒则预警
+			log.Printf("CZK Link: warning - download link expires soon (in %v), link: %s", expires, cleanedLink)
 		}
 	}
 
@@ -258,6 +262,229 @@ func (d *CZK) Link(ctx context.Context, file model.Obj, args model.LinkArgs) (*m
 		URL:    cleanedLink,
 		Header: linkHeader,
 	}, nil
+}
+
+// 移除冗余的isS3CompatibleURL方法（上述逻辑已覆盖S3链接处理，无需额外判断）
+
+func (d *CZK) Put(ctx context.Context, dstDir model.Obj, file model.FileStreamer, up driver.UpdateProgress) (model.Obj, error) {
+	if err := d.refreshTokenIfNeeded(); err != nil {
+		return nil, fmt.Errorf("failed to refresh token: %w", err)
+	}
+
+	// 1. 基础配置与文件预处理
+	d.client.SetTimeout(10 * time.Minute)
+	defer d.client.SetTimeout(30 * time.Second) // 统一延迟恢复超时，避免重复代码
+
+	// 计算文件MD5（与文档hash参数对应）
+	tempFile, localMD5, err := stream.CacheFullAndHash(file, &up, utils.MD5)
+	if err != nil {
+		return nil, fmt.Errorf("failed to calculate file md5: %w", err)
+	}
+
+	// 重置文件流
+	if seeker, ok := tempFile.(io.Seeker); ok {
+		if _, err := seeker.Seek(0, io.SeekStart); err != nil {
+			return nil, fmt.Errorf("failed to seek file: %w", err)
+		}
+	}
+
+	// 2. 预备上传参数组装与校验（严格对齐文档类型要求）
+	localFileName := file.GetName()
+	localFileSize := file.GetSize()
+	filesizeStr := fmt.Sprintf("%d", localFileSize) // 转为string类型，符合文档要求
+	targetFolderID := dstDir.GetID()
+
+	// 校验filesize是否为纯数字字符串（文档强制要求）
+	if !filesizeRegex.MatchString(filesizeStr) {
+		return nil, fmt.Errorf("filesize does not match string format: %s (must be numeric string)", filesizeStr)
+	}
+
+	// 存储预备上传参数，用于后续完成上传的一致性校验
+	prepUploadParams := struct {
+		hash     string
+		filename string
+		filesize string
+		folder   string
+	}{
+		hash:     localMD5,
+		filename: localFileName,
+		filesize: filesizeStr,
+		folder:   targetFolderID,
+	}
+
+	// 3. 执行预备上传（first_upload）
+	initUploadURL := "https://pan.szczk.top/czkapi/first_upload"
+	initPayload := &bytes.Buffer{}
+	initWriter := multipart.NewWriter(initPayload)
+	_ = initWriter.WriteField("hash", prepUploadParams.hash)
+	_ = initWriter.WriteField("filename", prepUploadParams.filename)
+	_ = initWriter.WriteField("filesize", prepUploadParams.filesize)
+	_ = initWriter.WriteField("folder", prepUploadParams.folder)
+	if err := initWriter.Close(); err != nil {
+		return nil, fmt.Errorf("failed to create init upload form: %w", err)
+	}
+
+	log.Printf("CZK Put: init upload - hash=%s, filename=%s, filesize=%s, folder=%s",
+		prepUploadParams.hash, prepUploadParams.filename, prepUploadParams.filesize, prepUploadParams.folder)
+
+	initResp, err := d.client.R().
+		SetHeader("Authorization", "Bearer "+d.AccessToken).
+		SetHeader("Content-Type", initWriter.FormDataContentType()).
+		SetBody(initPayload.Bytes()).
+		Post(initUploadURL)
+	if err != nil {
+		return nil, fmt.Errorf("failed to send init upload request: %w", err)
+	}
+	if initResp.StatusCode() != http.StatusOK {
+		return nil, fmt.Errorf("init upload failed (status %d): %s", initResp.StatusCode(), initResp.String())
+	}
+
+	// 4. 解析预备上传响应（新增接口返回字段校验）
+	type PrepRespData struct {
+		Status    string `json:"status"`
+		CsrfToken string `json:"csrf_token"`
+		UploadURL string `json:"upload_url"`
+		FileKey   string `json:"file_key"`
+		FileHash  string `json:"file_hash"` // 文档返回的MD5，需与本地比对
+		FileSize  int64  `json:"filesize"`  // 文档返回的大小，需与本地比对
+	}
+	type PrepResp struct {
+		Code    int          `json:"code"`
+		Message string       `json:"message"`
+		Data    PrepRespData `json:"data"`
+	}
+
+	var prepResp PrepResp
+	if err := json.Unmarshal(initResp.Body(), &prepResp); err != nil {
+		return nil, fmt.Errorf("failed to parse init resp: %w, body=%s", err, initResp.String())
+	}
+
+	// 校验预备响应状态码
+	if prepResp.Code != 200 {
+		return nil, fmt.Errorf("init upload API error: code=%d, msg=%s", prepResp.Code, prepResp.Message)
+	}
+
+	// 校验响应必需字段
+	if prepResp.Data.CsrfToken == "" || prepResp.Data.UploadURL == "" || prepResp.Data.FileKey == "" {
+		return nil, fmt.Errorf("init resp missing required fields: csrf_token=%s, upload_url=%s, file_key=%s",
+			prepResp.Data.CsrfToken, prepResp.Data.UploadURL, prepResp.Data.FileKey)
+	}
+
+	// 校验：本地MD5 vs 接口返回FileHash（避免本地计算错误）
+	if prepResp.Data.FileHash != localMD5 {
+		return nil, fmt.Errorf("MD5 mismatch: local=%s, api_return=%s", localMD5, prepResp.Data.FileHash)
+	}
+
+	// 校验：本地文件大小 vs 接口返回FileSize（避免大小错误）
+	if prepResp.Data.FileSize != localFileSize {
+		return nil, fmt.Errorf("file size mismatch: local=%d, api_return=%d", localFileSize, prepResp.Data.FileSize)
+	}
+
+	log.Printf("CZK Put: init upload success - csrf_token=%s***, upload_url=%s, file_key=%s",
+		prepResp.Data.CsrfToken[:10], prepResp.Data.UploadURL, prepResp.Data.FileKey)
+
+	// 5. 上传文件到upload_url（新增Content-Type，修复文档S3上传规范）
+	// 5.1 重置文件流
+	if seeker, ok := tempFile.(io.Seeker); ok {
+		if _, err := seeker.Seek(0, io.SeekStart); err != nil {
+			return nil, fmt.Errorf("failed to reset file stream: %w", err)
+		}
+	}
+
+	// 5.2 自动识别文件Content-Type（S3上传通用要求，文档隐含规范）
+	var contentType string
+	{
+		// 读取文件开头部分用于类型识别
+		buf := make([]byte, 512)
+		n, err := tempFile.Read(buf)
+		if err != nil && err != io.EOF {
+			return nil, fmt.Errorf("failed to read file for Content-Type: %w", err)
+		}
+		contentType = http.DetectContentType(buf[:n])
+
+		// 恢复文件流位置
+		if seeker, ok := tempFile.(io.Seeker); ok {
+			if _, err := seeker.Seek(0, io.SeekStart); err != nil {
+				return nil, fmt.Errorf("failed to restore file stream: %w", err)
+			}
+		}
+	}
+
+	// 5.3 获取有效Content-Length（复用之前修复逻辑，确保合规）
+	var contentLength int64
+	if localFileSize > 0 {
+		contentLength = localFileSize
+	} else if seeker, ok := tempFile.(io.Seeker); ok {
+		curPos, _ := seeker.Seek(0, io.SeekCurrent)
+		endPos, _ := seeker.Seek(0, io.SeekEnd)
+		contentLength = endPos
+		seeker.Seek(curPos, io.SeekStart)
+	}
+	if contentLength <= 0 {
+		return nil, fmt.Errorf("invalid Content-Length: %d", contentLength)
+	}
+
+	// 5.4 执行S3上传
+	uploadResp, err := d.client.R().
+		SetHeader("Content-Length", fmt.Sprintf("%d", contentLength)).
+		SetHeader("Content-Type", contentType). // 新增：符合S3上传规范
+		SetBody(tempFile).
+		Put(prepResp.Data.UploadURL)
+	if err != nil {
+		return nil, fmt.Errorf("failed to upload to storage: %w", err)
+	}
+	if uploadResp.StatusCode() != http.StatusOK {
+		return nil, fmt.Errorf("storage upload failed (status %d): %s", uploadResp.StatusCode(), uploadResp.String())
+	}
+	log.Printf("CZK Put: file uploaded to storage - Content-Type=%s, Content-Length=%d", contentType, contentLength)
+
+	// 6. 执行完成上传（ok_upload，新增参数一致性校验）
+	// 6.1 校验完成上传参数与预备上传一致（文档强制要求）
+	completePayload := &bytes.Buffer{}
+	completeWriter := multipart.NewWriter(completePayload)
+	// 逐一比对参数，确保一致性
+	_ = completeWriter.WriteField("hash", prepUploadParams.hash)
+	_ = completeWriter.WriteField("filename", prepUploadParams.filename)
+	_ = completeWriter.WriteField("filesize", prepUploadParams.filesize)
+	_ = completeWriter.WriteField("csrf_token", prepResp.Data.CsrfToken)
+	_ = completeWriter.WriteField("file_key", prepResp.Data.FileKey)
+	_ = completeWriter.WriteField("folder", prepUploadParams.folder)
+	if err := completeWriter.Close(); err != nil {
+		return nil, fmt.Errorf("failed to create complete form: %w", err)
+	}
+
+	log.Printf("CZK Put: complete upload - hash=%s, filename=%s, filesize=%s",
+		prepUploadParams.hash, prepUploadParams.filename, prepUploadParams.filesize)
+
+	completeResp, err := d.client.R().
+		SetHeader("Authorization", "Bearer "+d.AccessToken).
+		SetHeader("Content-Type", completeWriter.FormDataContentType()).
+		SetBody(completePayload.Bytes()).
+		Post("https://pan.szczk.top/czkapi/ok_upload")
+	if err != nil {
+		return nil, fmt.Errorf("failed to send complete request: %w", err)
+	}
+	if completeResp.StatusCode() != http.StatusOK {
+		return nil, fmt.Errorf("complete upload failed (status %d): %s", completeResp.StatusCode(), completeResp.String())
+	}
+
+	// 7. 解析完成上传响应（对齐文档“返回空对象”规范）
+	var completeRespData map[string]interface{}
+	if err := json.Unmarshal(completeResp.Body(), &completeRespData); err != nil {
+		log.Printf("CZK Put: complete resp parse warning (expected empty object): %v", err)
+		// 文档明确返回空对象，解析失败不阻断流程
+	}
+	log.Printf("CZK Put: complete upload success - resp=%s", completeResp.String())
+
+	// 8. 构建返回对象（ID留空，因文档未返回file_id）
+	newObj := &model.Object{
+		ID:       "", // 文档未返回file_id，需通过后续List接口获取
+		Name:     prepUploadParams.filename,
+		Size:     localFileSize,
+		Modified: time.Now(),
+		IsFolder: false,
+	}
+	return newObj, nil
 }
 
 func (d *CZK) authenticate() error {
@@ -702,235 +929,6 @@ func (d *CZK) Remove(ctx context.Context, obj model.Obj) error {
 	}
 
 	return nil
-}
-
-func (d *CZK) Put(ctx context.Context, dstDir model.Obj, file model.FileStreamer, up driver.UpdateProgress) (model.Obj, error) {
-	if err := d.refreshTokenIfNeeded(); err != nil {
-		return nil, fmt.Errorf("failed to refresh token: %w", err)
-	}
-
-	// 增加请求超时时间以提高大文件上传的稳定性
-	d.client.SetTimeout(10 * time.Minute)
-
-	// 使用OpenList提供的工具函数计算文件的MD5哈希值
-	tempFile, md5Hash, err := stream.CacheFullAndHash(file, &up, utils.MD5)
-	if err != nil {
-		return nil, fmt.Errorf("failed to calculate file md5: %w", err)
-	}
-
-	// 重置文件流以便后续使用
-	if seeker, ok := tempFile.(io.Seeker); ok {
-		if _, err := seeker.Seek(0, io.SeekStart); err != nil {
-			return nil, fmt.Errorf("failed to seek file: %w", err)
-		}
-	}
-
-	// 初始化上传
-	initUploadURL := "https://pan.szczk.top/czkapi/first_upload"
-
-	// 创建表单数据
-	payload := &bytes.Buffer{}
-	writer := multipart.NewWriter(payload)
-	_ = writer.WriteField("hash", md5Hash)
-	_ = writer.WriteField("filename", file.GetName())
-	_ = writer.WriteField("filesize", fmt.Sprintf("%d", file.GetSize()))
-	_ = writer.WriteField("folder", dstDir.GetID())
-	err = writer.Close()
-	if err != nil {
-		return nil, fmt.Errorf("failed to create init upload form: %w", err)
-	}
-
-	log.Printf("CZK Put init upload request - URL: %s, filename: %s, filesize: %d, hash: %s, folder: %s",
-		initUploadURL, file.GetName(), file.GetSize(), md5Hash, dstDir.GetID())
-
-	resp, err := d.client.R().
-		SetHeader("Authorization", "Bearer "+d.AccessToken).
-		SetHeader("Content-Type", writer.FormDataContentType()).
-		SetBody(payload.Bytes()).
-		Post(initUploadURL)
-
-	if err != nil {
-		// 恢复默认超时时间
-		d.client.SetTimeout(30 * time.Second)
-		return nil, fmt.Errorf("failed to send init upload request: %w", err)
-	}
-
-	if resp.StatusCode() != http.StatusOK {
-		// 恢复默认超时时间
-		d.client.SetTimeout(30 * time.Second)
-		return nil, fmt.Errorf("failed to initialize upload with status %d: %s", resp.StatusCode(), resp.String())
-	}
-
-	// 解析初始化上传的响应
-	var initResp map[string]interface{}
-	if err := json.Unmarshal(resp.Body(), &initResp); err != nil {
-		// 恢复默认超时时间
-		d.client.SetTimeout(30 * time.Second)
-		return nil, fmt.Errorf("failed to parse upload init response: %w", err)
-	}
-
-	// 记录响应内容用于调试
-	log.Printf("CZK Put init upload response: %+v", initResp)
-
-	// 检查响应中是否有错误信息，根据API示例使用code字段
-	if code, ok := initResp["code"].(float64); ok && int64(code) != 200 {
-		message := "unknown error"
-		if msg, ok := initResp["message"].(string); ok {
-			// 根据API文档，使用message字段
-			message = msg
-		}
-		// 恢复默认超时时间
-		d.client.SetTimeout(30 * time.Second)
-		return nil, fmt.Errorf("init upload API error: code=%d, message=%s", int64(code), message)
-	}
-
-	// 从初始化响应中提取需要的参数
-	csrfToken := ""
-	fileKey := ""
-	uploadURL := ""
-
-	if data, ok := initResp["data"].(map[string]interface{}); ok {
-		if token, ok := data["csrf_token"].(string); ok {
-			csrfToken = token
-		}
-		if key, ok := data["file_key"].(string); ok {
-			fileKey = key
-		}
-		if url, ok := data["upload_url"].(string); ok {
-			uploadURL = url
-		}
-		log.Printf("CZK Put extracted from init response: csrf_token=%s, file_key=%s, upload_url=%s", csrfToken, fileKey, uploadURL)
-	} else {
-		log.Printf("CZK Put failed to parse data field from init response: %+v", initResp)
-	}
-
-	// 检查必要参数是否存在
-	if csrfToken == "" || fileKey == "" {
-		// 恢复默认超时时间
-		d.client.SetTimeout(30 * time.Second)
-		return nil, fmt.Errorf("missing required parameters from init upload response: csrf_token=%s, file_key=%s, full response: %+v", csrfToken, fileKey, initResp)
-	}
-
-	// 如果有upload_url，则需要先上传文件到该URL
-	if uploadURL != "" {
-		log.Printf("CZK Put uploading file to: %s", uploadURL)
-
-		// 重置文件流到开始位置
-		if seeker, ok := tempFile.(io.Seeker); ok {
-			if _, err := seeker.Seek(0, io.SeekStart); err != nil {
-				// 恢复默认超时时间
-				d.client.SetTimeout(30 * time.Second)
-				return nil, fmt.Errorf("failed to seek file: %w", err)
-			}
-		}
-
-		// 获取文件大小以设置Content-Length头部
-		var contentLength int64
-		if seeker, ok := tempFile.(io.Seeker); ok {
-			curPos, _ := seeker.Seek(0, io.SeekCurrent)
-			endPos, _ := seeker.Seek(0, io.SeekEnd)
-			contentLength = endPos
-			seeker.Seek(curPos, io.SeekStart) // 恢复当前位置
-		} else {
-			contentLength = file.GetSize()
-		}
-
-		// 上传文件到指定的URL
-		uploadResp, err := d.client.R().
-			SetHeader("Content-Length", fmt.Sprintf("%d", contentLength)).
-			SetBody(tempFile).
-			Put(uploadURL)
-
-		if err != nil {
-			// 恢复默认超时时间
-			d.client.SetTimeout(30 * time.Second)
-			return nil, fmt.Errorf("failed to upload file to storage: %w", err)
-		}
-
-		if uploadResp.StatusCode() != http.StatusOK {
-			// 恢复默认超时时间
-			d.client.SetTimeout(30 * time.Second)
-			return nil, fmt.Errorf("failed to upload file to storage with status %d: %s", uploadResp.StatusCode(), uploadResp.String())
-		}
-
-		log.Printf("CZK Put file uploaded to storage successfully")
-	}
-
-	// 完成上传
-	completeURL := "https://pan.szczk.top/czkapi/ok_upload"
-
-	// 创建完成上传的表单数据
-	completePayload := &bytes.Buffer{}
-	completeWriter := multipart.NewWriter(completePayload)
-	_ = completeWriter.WriteField("hash", md5Hash)
-	_ = completeWriter.WriteField("filename", fmt.Sprintf("%d", file.GetSize()))
-	_ = completeWriter.WriteField("filesize", fmt.Sprintf("%d", file.GetSize()))
-	_ = completeWriter.WriteField("csrf_token", csrfToken)
-	_ = completeWriter.WriteField("file_key", fileKey)
-	_ = completeWriter.WriteField("folder", dstDir.GetID())
-	err = completeWriter.Close()
-	if err != nil {
-		// 恢复默认超时时间
-		d.client.SetTimeout(30 * time.Second)
-		return nil, fmt.Errorf("failed to create complete upload form: %w", err)
-	}
-
-	log.Printf("CZK Put complete upload request - URL: %s, filename: %s, filesize: %d, hash: %s, csrf_token: %s, file_key: %s, folder: %s",
-		completeURL, fmt.Sprintf("%d", file.GetSize()), file.GetSize(), md5Hash, csrfToken, fileKey, dstDir.GetID())
-
-	completeResp, err := d.client.R().
-		SetHeader("Authorization", "Bearer "+d.AccessToken).
-		SetHeader("Content-Type", completeWriter.FormDataContentType()).
-		SetBody(completePayload.Bytes()).
-		Post(completeURL)
-	// 恢复默认超时时间
-	d.client.SetTimeout(30 * time.Second)
-
-	if err != nil {
-		return nil, fmt.Errorf("failed to send complete upload request: %w", err)
-	}
-
-	if completeResp.StatusCode() != http.StatusOK {
-		return nil, fmt.Errorf("failed to complete upload with status %d: %s", completeResp.StatusCode(), completeResp.String())
-	}
-
-	// 解析完成上传的响应
-	var completeRespData map[string]interface{}
-	if err := json.Unmarshal(completeResp.Body(), &completeRespData); err != nil {
-		return nil, fmt.Errorf("failed to parse upload complete response: %w", err)
-	}
-
-	// 记录响应内容用于调试
-	log.Printf("CZK Put complete upload response: %+v", completeRespData)
-
-	// 检查响应中是否有错误信息，根据API示例使用code字段
-	if code, ok := completeRespData["code"].(float64); ok && int64(code) != 200 {
-		message := "unknown error"
-		if msg, ok := completeRespData["message"].(string); ok {
-			// 根据API文档，使用message字段
-			message = msg
-		}
-		return nil, fmt.Errorf("complete upload API error: code=%d, message=%s", int64(code), message)
-	}
-
-	// 从响应中提取文件ID
-	fileID := ""
-	if data, ok := completeRespData["data"].(map[string]interface{}); ok {
-		if id, ok := data["file_id"].(float64); ok {
-			fileID = fmt.Sprintf("%.0f", id)
-		}
-	}
-
-	// 返回新创建的文件对象
-	newObj := &model.Object{
-		ID:       fileID,
-		Name:     file.GetName(),
-		Size:     file.GetSize(),
-		Modified: time.Now(),
-		IsFolder: false,
-	}
-
-	return newObj, nil
 }
 
 func (d *CZK) GetArchiveMeta(ctx context.Context, obj model.Obj, args model.ArchiveArgs) (model.ArchiveMeta, error) {
