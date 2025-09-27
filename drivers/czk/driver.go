@@ -443,7 +443,7 @@ func (d *CZK) Move(ctx context.Context, srcObj, dstDir model.Obj) (model.Obj, er
 		return nil, fmt.Errorf("failed to refresh token: %w", err)
 	}
 
-	url := "https://pan.szczk.top/czkapi/move_folder"
+	url := "https://pan.szczk.top/czkapi/move_item"
 
 	// 创建表单数据，根据API示例使用正确的参数名
 	payload := &bytes.Buffer{}
@@ -608,7 +608,7 @@ func (d *CZK) Remove(ctx context.Context, obj model.Obj) error {
 		return fmt.Errorf("failed to refresh token: %w", err)
 	}
 
-	url := "https://pan.szczk.top/czkapi/del"
+	url := "https://pan.szczk.top/czkapi/delete_item"
 
 	// 创建表单数据
 	payload := &bytes.Buffer{}
@@ -664,7 +664,7 @@ func (d *CZK) Put(ctx context.Context, dstDir model.Obj, file model.FileStreamer
 	}
 
 	// 初始化上传
-	initURL := "https://pan.szczk.top/czkapi/initiate_upload"
+	initURL := "https://pan.szczk.top/czkapi/first_upload"
 
 	// 创建表单数据
 	payload := &bytes.Buffer{}
@@ -727,7 +727,7 @@ func (d *CZK) Put(ctx context.Context, dstDir model.Obj, file model.FileStreamer
 	}
 
 	// 完成上传
-	completeURL := "https://pan.szczk.top/czkapi/complete_upload"
+	completeURL := "https://pan.szczk.top/czkapi/ok_upload"
 
 	// 创建完成上传的表单数据
 	completePayload := &bytes.Buffer{}
