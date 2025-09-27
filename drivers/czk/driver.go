@@ -49,7 +49,7 @@ func (d *CZK) Drop(ctx context.Context) error {
 
 func (d *CZK) List(ctx context.Context, dir model.Obj, args model.ListArgs) ([]model.Obj, error) {
 	if err := d.refreshTokenIfNeeded(); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to refresh token: %w", err)
 	}
 
 	url := fmt.Sprintf("https://pan.szczk.top/czkapi/list_files?folder_id=%s", dir.GetID())
@@ -58,17 +58,26 @@ func (d *CZK) List(ctx context.Context, dir model.Obj, args model.ListArgs) ([]m
 		Get(url)
 
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to send list request: %w", err)
 	}
 
 	if resp.StatusCode() != http.StatusOK {
-		return nil, fmt.Errorf("failed to list files: %s", resp.String())
+		return nil, fmt.Errorf("failed to list files with status %d: %s", resp.StatusCode(), resp.String())
 	}
 
-	// 解析响应并返回文件列�?
+	// 解析响应并返回文件列表
 	var listResp map[string]interface{}
 	if err := json.Unmarshal(resp.Body(), &listResp); err != nil {
 		return nil, fmt.Errorf("failed to parse file list response: %w", err)
+	}
+
+	// 检查响应中是否有错误信息
+	if status, ok := listResp["status"].(float64); ok && int64(status) != 200 {
+		message := "unknown error"
+		if msg, ok := listResp["message"].(string); ok {
+			message = msg
+		}
+		return nil, fmt.Errorf("list files API error: status=%d, message=%s", int64(status), message)
 	}
 
 	// 从响应中提取文件数据
@@ -104,13 +113,13 @@ func (d *CZK) List(ctx context.Context, dir model.Obj, args model.ListArgs) ([]m
 		// 解析文件修改时间
 		var modified time.Time
 		if file.Modified != "" {
-			// 尝试几种常见的时间格�?
+			// 尝试几种常见的时间格式
 			if t, err := time.Parse(time.RFC3339, file.Modified); err == nil {
 				modified = t
 			} else if t, err := time.Parse("2006-01-02 15:04:05", file.Modified); err == nil {
 				modified = t
 			} else {
-				// 如果解析失败，使用当前时�?
+				// 如果解析失败，使用当前时间
 				modified = time.Now()
 			}
 		} else {
@@ -131,7 +140,7 @@ func (d *CZK) List(ctx context.Context, dir model.Obj, args model.ListArgs) ([]m
 
 func (d *CZK) Link(ctx context.Context, file model.Obj, args model.LinkArgs) (*model.Link, error) {
 	if err := d.refreshTokenIfNeeded(); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to refresh token: %w", err)
 	}
 
 	// 根据最新反馈，下载链接接口需要添加Authorization认证头部
@@ -141,23 +150,32 @@ func (d *CZK) Link(ctx context.Context, file model.Obj, args model.LinkArgs) (*m
 		Get(url)
 
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to send get download link request: %w", err)
 	}
 
 	if resp.StatusCode() != http.StatusOK {
-		return nil, fmt.Errorf("failed to get download link: %s", resp.String())
+		return nil, fmt.Errorf("failed to get download link with status %d: %s", resp.StatusCode(), resp.String())
 	}
 
-	// 解析响应并返回下载链�?
+	// 解析响应并返回下载链接
 	var downloadResp map[string]interface{}
 	if err := json.Unmarshal(resp.Body(), &downloadResp); err != nil {
 		return nil, fmt.Errorf("failed to parse download link response: %w", err)
 	}
 
+	// 检查响应中是否有错误信息
+	if status, ok := downloadResp["status"].(float64); ok && int64(status) != 200 {
+		message := "unknown error"
+		if msg, ok := downloadResp["message"].(string); ok {
+			message = msg
+		}
+		return nil, fmt.Errorf("get download link API error: status=%d, message=%s", int64(status), message)
+	}
+
 	// 从响应中提取下载链接
 	var downloadLink string
 	if data, ok := downloadResp["data"].(map[string]interface{}); ok {
-		// 尝试从不同字段获取下载链�?
+		// 尝试从不同字段获取下载链接
 		if link, ok := data["download_link"].(string); ok && link != "" {
 			downloadLink = link
 		} else if url, ok := data["url"].(string); ok && url != "" {
@@ -177,22 +195,27 @@ func (d *CZK) Link(ctx context.Context, file model.Obj, args model.LinkArgs) (*m
 func (d *CZK) authenticate() error {
 	url := "https://pan.szczk.top/czkapi/authenticate"
 	resp, err := d.client.R().
-		SetHeader("x-api-key", "").
-		SetHeader("x-api-secret", "").
+		SetHeader("x-api-key", d.APIKey).
+		SetHeader("x-api-secret", d.APISecret).
 		Get(url)
 
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to send auth request: %w", err)
 	}
 
 	if resp.StatusCode() != http.StatusOK {
-		return fmt.Errorf("authentication failed: %s", resp.String())
+		return fmt.Errorf("authentication failed with status %d: %s", resp.StatusCode(), resp.String())
 	}
 
-	// 解析认证响应，获取access_token, refresh_token�?
+	// 解析认证响应，获取access_token, refresh_token等
 	var authResp AuthResp
 	if err := json.Unmarshal(resp.Body(), &authResp); err != nil {
 		return fmt.Errorf("failed to parse auth response: %w", err)
+	}
+	
+	// 检查API返回的状态码
+	if authResp.Status != 200 {
+		return fmt.Errorf("authentication API error: status=%d, message=%s", authResp.Status, authResp.Message)
 	}
 	
 	d.AccessToken = authResp.Data.AccessToken
@@ -227,17 +250,22 @@ func (d *CZK) refreshToken() error {
 		Post(url)
 
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to send refresh request: %w", err)
 	}
 
 	if resp.StatusCode() != http.StatusOK {
-		return fmt.Errorf("token refresh failed: %s", resp.String())
+		return fmt.Errorf("token refresh failed with status %d: %s", resp.StatusCode(), resp.String())
 	}
 
-	// 解析刷新令牌响应，更新access_token�?
+	// 解析刷新令牌响应，更新access_token等
 	var refreshResp RefreshResp
 	if err := json.Unmarshal(resp.Body(), &refreshResp); err != nil {
 		return fmt.Errorf("failed to parse refresh response: %w", err)
+	}
+	
+	// 检查API返回的状态码
+	if refreshResp.Status != 200 {
+		return fmt.Errorf("token refresh API error: status=%d, message=%s", refreshResp.Status, refreshResp.Message)
 	}
 	
 	d.AccessToken = refreshResp.Data.AccessToken
@@ -246,10 +274,10 @@ func (d *CZK) refreshToken() error {
 	return nil
 }
 
-// 以下方法为可选实�?
+// 以下方法为可选实现
 func (d *CZK) MakeDir(ctx context.Context, parentDir model.Obj, dirName string) (model.Obj, error) {
 	if err := d.refreshTokenIfNeeded(); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to refresh token: %w", err)
 	}
 
 	url := "https://pan.szczk.top/czkapi/create_folder"
@@ -261,7 +289,7 @@ func (d *CZK) MakeDir(ctx context.Context, parentDir model.Obj, dirName string) 
 	_ = writer.WriteField("name", dirName)
 	err := writer.Close()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to create mkdir form: %w", err)
 	}
 
 	resp, err := d.client.R().
@@ -271,11 +299,11 @@ func (d *CZK) MakeDir(ctx context.Context, parentDir model.Obj, dirName string) 
 		Post(url)
 
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to send mkdir request: %w", err)
 	}
 
 	if resp.StatusCode() != http.StatusOK {
-		return nil, fmt.Errorf("failed to create folder: %s", resp.String())
+		return nil, fmt.Errorf("failed to create folder with status %d: %s", resp.StatusCode(), resp.String())
 	}
 
 	// 解析响应
@@ -284,8 +312,17 @@ func (d *CZK) MakeDir(ctx context.Context, parentDir model.Obj, dirName string) 
 		return nil, fmt.Errorf("failed to parse create folder response: %w", err)
 	}
 
+	// 检查响应中是否有错误信息
+	if status, ok := operationResp["status"].(float64); ok && int64(status) != 200 {
+		message := "unknown error"
+		if msg, ok := operationResp["message"].(string); ok {
+			message = msg
+		}
+		return nil, fmt.Errorf("create folder API error: status=%d, message=%s", int64(status), message)
+	}
+
 	// 返回新创建的目录对象
-	// 注意：这里应该根据实际API响应来构建对�?
+	// 注意：这里应该根据实际API响应来构建对象
 	// 目前我们创建一个基本的对象
 	newObj := &model.Object{
 		ID:       "", // 应该从响应中获取实际ID
@@ -300,7 +337,7 @@ func (d *CZK) MakeDir(ctx context.Context, parentDir model.Obj, dirName string) 
 
 func (d *CZK) Move(ctx context.Context, srcObj, dstDir model.Obj) (model.Obj, error) {
 	if err := d.refreshTokenIfNeeded(); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to refresh token: %w", err)
 	}
 
 	url := "https://pan.szczk.top/czkapi/move_item"
@@ -318,7 +355,7 @@ func (d *CZK) Move(ctx context.Context, srcObj, dstDir model.Obj) (model.Obj, er
 	_ = writer.WriteField("target_id", dstDir.GetID()) // 根据示例使用target_id而不是new_parent_id
 	err := writer.Close()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to create move form: %w", err)
 	}
 
 	resp, err := d.client.R().
@@ -328,11 +365,11 @@ func (d *CZK) Move(ctx context.Context, srcObj, dstDir model.Obj) (model.Obj, er
 		Post(url)
 
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to send move request: %w", err)
 	}
 
 	if resp.StatusCode() != http.StatusOK {
-		return nil, fmt.Errorf("failed to move item: %s", resp.String())
+		return nil, fmt.Errorf("failed to move item with status %d: %s", resp.StatusCode(), resp.String())
 	}
 
 	// 解析响应
@@ -341,9 +378,18 @@ func (d *CZK) Move(ctx context.Context, srcObj, dstDir model.Obj) (model.Obj, er
 		return nil, fmt.Errorf("failed to parse move response: %w", err)
 	}
 
+	// 检查响应中是否有错误信息
+	if status, ok := operationResp["status"].(float64); ok && int64(status) != 200 {
+		message := "unknown error"
+		if msg, ok := operationResp["message"].(string); ok {
+			message = msg
+		}
+		return nil, fmt.Errorf("move item API error: status=%d, message=%s", int64(status), message)
+	}
+
 	// 返回更新后的对象
-	// 注意：这里应该根据实际API响应来构建对�?
-	// 目前我们简单地复制原对象并更新父目�?
+	// 注意：这里应该根据实际API响应来构建对象
+	// 目前我们简单地复制原对象并更新父目录
 	newObj := &model.Object{
 		ID:       srcObj.GetID(),
 		Name:     srcObj.GetName(),
@@ -357,7 +403,7 @@ func (d *CZK) Move(ctx context.Context, srcObj, dstDir model.Obj) (model.Obj, er
 
 func (d *CZK) Rename(ctx context.Context, srcObj model.Obj, newName string) (model.Obj, error) {
 	if err := d.refreshTokenIfNeeded(); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to refresh token: %w", err)
 	}
 
 	url := "https://pan.szczk.top/czkapi/rename_item"
@@ -375,7 +421,7 @@ func (d *CZK) Rename(ctx context.Context, srcObj model.Obj, newName string) (mod
 	_ = writer.WriteField("new_name", newName)
 	err := writer.Close()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to create rename form: %w", err)
 	}
 
 	resp, err := d.client.R().
@@ -385,11 +431,11 @@ func (d *CZK) Rename(ctx context.Context, srcObj model.Obj, newName string) (mod
 		Post(url)
 
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to send rename request: %w", err)
 	}
 
 	if resp.StatusCode() != http.StatusOK {
-		return nil, fmt.Errorf("failed to rename item: %s", resp.String())
+		return nil, fmt.Errorf("failed to rename item with status %d: %s", resp.StatusCode(), resp.String())
 	}
 
 	// 解析响应
@@ -398,8 +444,17 @@ func (d *CZK) Rename(ctx context.Context, srcObj model.Obj, newName string) (mod
 		return nil, fmt.Errorf("failed to parse rename response: %w", err)
 	}
 
+	// 检查响应中是否有错误信息
+	if status, ok := operationResp["status"].(float64); ok && int64(status) != 200 {
+		message := "unknown error"
+		if msg, ok := operationResp["message"].(string); ok {
+			message = msg
+		}
+		return nil, fmt.Errorf("rename item API error: status=%d, message=%s", int64(status), message)
+	}
+
 	// 返回更新后的对象
-	// 注意：这里应该根据实际API响应来构建对�?
+	// 注意：这里应该根据实际API响应来构建对象
 	// 目前我们简单地复制原对象并更新名称
 	newObj := &model.Object{
 		ID:       srcObj.GetID(),
@@ -412,15 +467,9 @@ func (d *CZK) Rename(ctx context.Context, srcObj model.Obj, newName string) (mod
 	return newObj, nil
 }
 
-func (d *CZK) Copy(ctx context.Context, srcObj, dstDir model.Obj) (model.Obj, error) {
-	// 如果API支持复制功能，可以在这里实现
-	// 目前返回未实现错�?
-	return nil, errs.NotImplement
-}
-
 func (d *CZK) Remove(ctx context.Context, obj model.Obj) error {
 	if err := d.refreshTokenIfNeeded(); err != nil {
-		return err
+		return fmt.Errorf("failed to refresh token: %w", err)
 	}
 
 	url := "https://pan.szczk.top/czkapi/delete_item"
@@ -437,7 +486,7 @@ func (d *CZK) Remove(ctx context.Context, obj model.Obj) error {
 	}())
 	err := writer.Close()
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to create delete form: %w", err)
 	}
 
 	resp, err := d.client.R().
@@ -447,11 +496,11 @@ func (d *CZK) Remove(ctx context.Context, obj model.Obj) error {
 		Post(url)
 
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to send delete request: %w", err)
 	}
 
 	if resp.StatusCode() != http.StatusOK {
-		return fmt.Errorf("failed to delete item: %s", resp.String())
+		return fmt.Errorf("failed to delete item with status %d: %s", resp.StatusCode(), resp.String())
 	}
 
 	// 解析响应
@@ -460,15 +509,24 @@ func (d *CZK) Remove(ctx context.Context, obj model.Obj) error {
 		return fmt.Errorf("failed to parse delete response: %w", err)
 	}
 
+	// 检查响应中是否有错误信息
+	if status, ok := operationResp["status"].(float64); ok && int64(status) != 200 {
+		message := "unknown error"
+		if msg, ok := operationResp["message"].(string); ok {
+			message = msg
+		}
+		return fmt.Errorf("delete item API error: status=%d, message=%s", int64(status), message)
+	}
+
 	return nil
 }
 
 func (d *CZK) Put(ctx context.Context, dstDir model.Obj, file model.FileStreamer, up driver.UpdateProgress) (model.Obj, error) {
 	if err := d.refreshTokenIfNeeded(); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to refresh token: %w", err)
 	}
 
-	// 初始化上�?
+	// 初始化上传
 	initURL := "https://pan.szczk.top/czkapi/first_upload"
 	
 	// 创建表单数据
@@ -480,7 +538,7 @@ func (d *CZK) Put(ctx context.Context, dstDir model.Obj, file model.FileStreamer
 	_ = writer.WriteField("folder", dstDir.GetID())
 	err := writer.Close()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to create init upload form: %w", err)
 	}
 
 	resp, err := d.client.R().
@@ -490,11 +548,11 @@ func (d *CZK) Put(ctx context.Context, dstDir model.Obj, file model.FileStreamer
 		Post(initURL)
 
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to send init upload request: %w", err)
 	}
 
 	if resp.StatusCode() != http.StatusOK {
-		return nil, fmt.Errorf("failed to initialize upload: %s", resp.String())
+		return nil, fmt.Errorf("failed to initialize upload with status %d: %s", resp.StatusCode(), resp.String())
 	}
 
 	// 解析初始化上传的响应
@@ -503,24 +561,48 @@ func (d *CZK) Put(ctx context.Context, dstDir model.Obj, file model.FileStreamer
 		return nil, fmt.Errorf("failed to parse upload init response: %w", err)
 	}
 
+	// 检查响应中是否有错误信息
+	if status, ok := initResp["status"].(float64); ok && int64(status) != 200 {
+		message := "unknown error"
+		if msg, ok := initResp["message"].(string); ok {
+			message = msg
+		}
+		return nil, fmt.Errorf("init upload API error: status=%d, message=%s", int64(status), message)
+	}
+
 	// 从初始化响应中提取需要的参数
-	// 这里应该根据实际API响应来提取csrf_token和file_key等参�?
+	csrfToken := ""
+	fileKey := ""
+	
+	if data, ok := initResp["data"].(map[string]interface{}); ok {
+		if token, ok := data["csrf_token"].(string); ok {
+			csrfToken = token
+		}
+		if key, ok := data["file_key"].(string); ok {
+			fileKey = key
+		}
+	}
+
+	// 检查必要参数是否存在
+	if csrfToken == "" || fileKey == "" {
+		return nil, fmt.Errorf("missing required parameters from init upload response: csrf_token=%s, file_key=%s", csrfToken, fileKey)
+	}
 
 	// 完成上传
 	completeURL := "https://pan.szczk.top/czkapi/ok_upload"
 	
-	// 创建完成上传的表单数�?
+	// 创建完成上传的表单数据
 	completePayload := &bytes.Buffer{}
 	completeWriter := multipart.NewWriter(completePayload)
 	_ = completeWriter.WriteField("hash", "") // 简化处理，实际应使用文件hash
 	_ = completeWriter.WriteField("filename", file.GetName())
 	_ = completeWriter.WriteField("filesize", fmt.Sprintf("%d", file.GetSize()))
-	_ = completeWriter.WriteField("csrf_token", "") // 应从初始化响应中获取
-	_ = completeWriter.WriteField("file_key", "") // 应从初始化响应中获取
+	_ = completeWriter.WriteField("csrf_token", csrfToken)
+	_ = completeWriter.WriteField("file_key", fileKey)
 	_ = completeWriter.WriteField("folder", dstDir.GetID())
 	err = completeWriter.Close()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to create complete upload form: %w", err)
 	}
 
 	completeResp, err := d.client.R().
@@ -530,17 +612,26 @@ func (d *CZK) Put(ctx context.Context, dstDir model.Obj, file model.FileStreamer
 		Post(completeURL)
 
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to send complete upload request: %w", err)
 	}
 
 	if completeResp.StatusCode() != http.StatusOK {
-		return nil, fmt.Errorf("failed to complete upload: %s", completeResp.String())
+		return nil, fmt.Errorf("failed to complete upload with status %d: %s", completeResp.StatusCode(), completeResp.String())
 	}
 
-	// 解析完成上传的响�?
+	// 解析完成上传的响应
 	var completeRespData map[string]interface{}
 	if err := json.Unmarshal(completeResp.Body(), &completeRespData); err != nil {
 		return nil, fmt.Errorf("failed to parse upload complete response: %w", err)
+	}
+
+	// 检查响应中是否有错误信息
+	if status, ok := completeRespData["status"].(float64); ok && int64(status) != 200 {
+		message := "unknown error"
+		if msg, ok := completeRespData["message"].(string); ok {
+			message = msg
+		}
+		return nil, fmt.Errorf("complete upload API error: status=%d, message=%s", int64(status), message)
 	}
 
 	// 返回新创建的文件对象
@@ -577,7 +668,7 @@ func (d *CZK) GetDetails(ctx context.Context) (*model.StorageDetails, error) {
 
 var _ driver.Driver = (*CZK)(nil)
 
-// getStringValue 从interface{}中安全地提取字符串�?
+// getStringValue 从interface{}中安全地提取字符串值
 func getStringValue(val interface{}) string {
 	if str, ok := val.(string); ok {
 		return str
