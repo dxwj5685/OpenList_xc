@@ -56,6 +56,7 @@ func (d *CZK) List(ctx context.Context, dir model.Obj, args model.ListArgs) ([]m
 		return nil, fmt.Errorf("failed to refresh token: %w", err)
 	}
 
+	// 根据API文档，文件列表接口需要在URL中包含folder_id参数，并在请求头中携带Authorization
 	url := fmt.Sprintf("https://pan.szczk.top/czkapi/list_files?folder_id=%s", dir.GetID())
 	resp, err := d.client.R().
 		SetHeader("Authorization", "Bearer "+d.AccessToken).
@@ -72,8 +73,12 @@ func (d *CZK) List(ctx context.Context, dir model.Obj, args model.ListArgs) ([]m
 	// 解析响应并返回文件列表
 	var listResp map[string]interface{}
 	if err := json.Unmarshal(resp.Body(), &listResp); err != nil {
+		log.Printf("CZK List: failed to parse file list response: %v, response body: %s", err, string(resp.Body()))
 		return nil, fmt.Errorf("failed to parse file list response: %w", err)
 	}
+
+	// 记录响应内容用于调试
+	log.Printf("CZK List response: %+v", listResp)
 
 	// 检查响应中是否有错误信息
 	if status, ok := listResp["status"].(float64); ok && int64(status) != 200 {
@@ -141,6 +146,7 @@ func (d *CZK) List(ctx context.Context, dir model.Obj, args model.ListArgs) ([]m
 		})
 	}
 
+	log.Printf("CZK List: successfully listed %d files", len(objs))
 	return objs, nil
 }
 
@@ -149,7 +155,7 @@ func (d *CZK) Link(ctx context.Context, file model.Obj, args model.LinkArgs) (*m
 		return nil, fmt.Errorf("failed to refresh token: %w", err)
 	}
 
-	// 根据最新反馈，下载链接接口需要添加Authorization认证头部
+	// 根据API文档，下载链接接口需要添加Authorization认证头部
 	url := fmt.Sprintf("https://pan.szczk.top/czkapi/get_download_url?file_id=%s", file.GetID())
 	resp, err := d.client.R().
 		SetHeader("Authorization", "Bearer "+d.AccessToken).
@@ -166,8 +172,12 @@ func (d *CZK) Link(ctx context.Context, file model.Obj, args model.LinkArgs) (*m
 	// 解析响应并返回下载链接
 	var downloadResp map[string]interface{}
 	if err := json.Unmarshal(resp.Body(), &downloadResp); err != nil {
+		log.Printf("CZK Link: failed to parse download link response: %v, response body: %s", err, string(resp.Body()))
 		return nil, fmt.Errorf("failed to parse download link response: %w", err)
 	}
+
+	// 记录响应内容用于调试
+	log.Printf("CZK Link response: %+v", downloadResp)
 
 	// 检查响应中是否有错误信息
 	if status, ok := downloadResp["status"].(float64); ok && int64(status) != 200 {
@@ -189,7 +199,9 @@ func (d *CZK) Link(ctx context.Context, file model.Obj, args model.LinkArgs) (*m
 		}
 	}
 
+	// 根据API文档，响应可能为空对象，这种情况下我们记录警告但不报错
 	if downloadLink == "" {
+		log.Printf("CZK Link: warning - no download link found in response: %+v", downloadResp)
 		return nil, fmt.Errorf("failed to get download link from response")
 	}
 
@@ -209,6 +221,7 @@ func (d *CZK) authenticate() error {
 	// 设置请求超时时间
 	d.client.SetTimeout(30 * time.Second)
 
+	// 根据API文档，认证接口需要在请求头中包含x-api-key和x-api-secret
 	resp, err := d.client.R().
 		SetHeader("x-api-key", d.APIKey).
 		SetHeader("x-api-secret", d.APISecret).
@@ -223,49 +236,41 @@ func (d *CZK) authenticate() error {
 	}
 
 	// 解析认证响应，获取access_token, refresh_token等
-	var authResp map[string]interface{}
+	var authResp AuthResp
 	if err := json.Unmarshal(resp.Body(), &authResp); err != nil {
+		log.Printf("CZK authenticate: failed to parse auth response: %v, response body: %s", err, string(resp.Body()))
 		return fmt.Errorf("failed to parse auth response: %w, response body: %s", err, string(resp.Body()))
 	}
 
+	// 记录响应内容用于调试
+	log.Printf("CZK authenticate response: Status=%d, Message=%s, Data.AccessToken=%s***, Data.RefreshToken=%s***, Data.ExpiresIn=%d, Data.TokenType=%s",
+		authResp.Status, authResp.Message,
+		authResp.Data.AccessToken[:min(len(authResp.Data.AccessToken), 10)],
+		authResp.Data.RefreshToken[:min(len(authResp.Data.RefreshToken), 10)],
+		authResp.Data.ExpiresIn, authResp.Data.TokenType)
+
 	// 检查API返回的状态码
-	status, ok := authResp["status"].(float64)
-	if !ok {
-		return fmt.Errorf("authentication API error: unexpected response format, status field missing or invalid")
-	}
-
-	message, _ := authResp["message"].(string)
-
-	// 即使status为0，如果message是"认证成功"，我们也认为认证成功
-	if status != 200 && message != "认证成功" {
-		return fmt.Errorf("authentication API error: status=%.0f, message=%s", status, message)
+	// 根据经验，即使status不是200，但如果message是"认证成功"，我们也认为认证成功
+	if authResp.Status != 200 && authResp.Message != "认证成功" {
+		return fmt.Errorf("authentication API error: status=%d, message=%s", authResp.Status, authResp.Message)
 	}
 
 	// 检查是否获得了必要的令牌
-	data, ok := authResp["data"].(map[string]interface{})
-	if !ok {
-		return fmt.Errorf("authentication succeeded but no data returned")
-	}
-
-	accessToken, ok := data["access_token"].(string)
-	if !ok || accessToken == "" {
+	if authResp.Data.AccessToken == "" {
 		return fmt.Errorf("authentication succeeded but no access token returned")
 	}
 
-	refreshToken, ok := data["refresh_token"].(string)
-	if !ok || refreshToken == "" {
+	if authResp.Data.RefreshToken == "" {
 		return fmt.Errorf("authentication succeeded but no refresh token returned")
 	}
 
-	expiresIn, ok := data["expires_in"].(float64)
-	if !ok {
-		return fmt.Errorf("authentication succeeded but no expires_in returned")
-	}
-
 	// 更新令牌信息
-	d.AccessToken = accessToken
-	d.RefreshToken = refreshToken
-	d.ExpiresAt = time.Now().Add(time.Duration(expiresIn) * time.Second)
+	d.AccessToken = authResp.Data.AccessToken
+	d.RefreshToken = authResp.Data.RefreshToken
+	d.ExpiresAt = time.Now().Add(time.Duration(authResp.Data.ExpiresIn) * time.Second)
+
+	log.Printf("CZK authenticate: successfully authenticated, access token: %s***, refresh token: %s***, expires at: %v",
+		d.AccessToken[:min(len(d.AccessToken), 10)], d.RefreshToken[:min(len(d.RefreshToken), 10)], d.ExpiresAt)
 
 	return nil
 }
@@ -292,7 +297,9 @@ func (d *CZK) refreshToken() error {
 		return fmt.Errorf("no refresh token available, need to re-authenticate")
 	}
 
-	// 创建表单数据
+	log.Printf("CZK refreshToken: attempting to refresh token with refresh token: %s***", d.RefreshToken[:min(len(d.RefreshToken), 10)])
+
+	// 创建表单数据，根据API文档，只需要refresh_token字段
 	payload := &bytes.Buffer{}
 	writer := multipart.NewWriter(payload)
 	_ = writer.WriteField("refresh_token", d.RefreshToken)
@@ -304,6 +311,7 @@ func (d *CZK) refreshToken() error {
 	// 设置请求超时时间
 	d.client.SetTimeout(30 * time.Second)
 
+	// 根据API文档，刷新令牌接口使用POST方法，请求体使用multipart/form-data格式
 	resp, err := d.client.R().
 		SetHeader("Content-Type", writer.FormDataContentType()).
 		SetBody(payload.Bytes()).
@@ -314,14 +322,22 @@ func (d *CZK) refreshToken() error {
 	}
 
 	if resp.StatusCode() != http.StatusOK {
+		log.Printf("CZK refreshToken: refresh request failed with status %d: %s, response body: %s", resp.StatusCode(), resp.Status(), string(resp.Body()))
 		return fmt.Errorf("token refresh failed with status %d: %s, response body: %s", resp.StatusCode(), resp.Status(), string(resp.Body()))
 	}
 
 	// 解析刷新令牌响应，更新access_token等
 	var refreshResp RefreshResp
 	if err := json.Unmarshal(resp.Body(), &refreshResp); err != nil {
+		log.Printf("CZK refreshToken: failed to parse refresh response: %v, response body: %s", err, string(resp.Body()))
 		return fmt.Errorf("failed to parse refresh response: %w, response body: %s", err, string(resp.Body()))
 	}
+
+	// 记录响应内容用于调试
+	log.Printf("CZK refreshToken response: Status=%d, Message=%s, Success=%t, Data.AccessToken=%s***, Data.ExpiresIn=%d, Data.TokenType=%s",
+		refreshResp.Status, refreshResp.Message, refreshResp.Success,
+		refreshResp.Data.AccessToken[:min(len(refreshResp.Data.AccessToken), 10)],
+		refreshResp.Data.ExpiresIn, refreshResp.Data.TokenType)
 
 	// 检查API返回的状态码和成功标志
 	// 当Success为true且Status为200时，表示刷新成功
@@ -334,17 +350,17 @@ func (d *CZK) refreshToken() error {
 	}
 
 	// 更新访问令牌和过期时间
-	// 根据API文档，当Success为true且Status为200时
-	// Data.AccessToken会包含新令牌
-	// Data.ExpiresIn会显示新令牌有效期
-	// Data.TokenType会指定令牌类型(通常是"Bearer")
 	d.AccessToken = refreshResp.Data.AccessToken
 	d.ExpiresAt = time.Now().Add(time.Duration(refreshResp.Data.ExpiresIn) * time.Second)
 
 	// 如果返回了新的刷新令牌，则更新它
 	if refreshResp.Data.RefreshToken != "" {
 		d.RefreshToken = refreshResp.Data.RefreshToken
+		log.Printf("CZK refreshToken: new refresh token received and updated: %s***", d.RefreshToken[:min(len(d.RefreshToken), 10)])
 	}
+
+	log.Printf("CZK refreshToken: successfully refreshed token, access token: %s***, expires at: %v",
+		d.AccessToken[:min(len(d.AccessToken), 10)], d.ExpiresAt)
 
 	return nil
 }
@@ -749,4 +765,12 @@ func getStringValue(val interface{}) string {
 		return str
 	}
 	return ""
+}
+
+// 添加min函数以避免编译错误
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
