@@ -194,6 +194,10 @@ func (d *CZK) Link(ctx context.Context, file model.Obj, args model.LinkArgs) (*m
 
 func (d *CZK) authenticate() error {
 	url := "https://pan.szczk.top/czkapi/authenticate"
+	
+	// 设置请求超时时间
+	d.client.SetTimeout(30 * time.Second)
+	
 	resp, err := d.client.R().
 		SetHeader("x-api-key", d.APIKey).
 		SetHeader("x-api-secret", d.APISecret).
@@ -204,13 +208,13 @@ func (d *CZK) authenticate() error {
 	}
 
 	if resp.StatusCode() != http.StatusOK {
-		return fmt.Errorf("authentication failed with status %d: %s", resp.StatusCode(), resp.String())
+		return fmt.Errorf("authentication failed with status %d: %s, response body: %s", resp.StatusCode(), resp.Status(), string(resp.Body()))
 	}
 
 	// 解析认证响应，获取access_token, refresh_token等
 	var authResp AuthResp
 	if err := json.Unmarshal(resp.Body(), &authResp); err != nil {
-		return fmt.Errorf("failed to parse auth response: %w", err)
+		return fmt.Errorf("failed to parse auth response: %w, response body: %s", err, string(resp.Body()))
 	}
 	
 	// 检查API返回的状态码
@@ -241,9 +245,12 @@ func (d *CZK) refreshToken() error {
 	_ = writer.WriteField("refresh_token", d.RefreshToken)
 	err := writer.Close()
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to create refresh token form: %w", err)
 	}
 
+	// 设置请求超时时间
+	d.client.SetTimeout(30 * time.Second)
+	
 	resp, err := d.client.R().
 		SetHeader("Content-Type", writer.FormDataContentType()).
 		SetBody(payload.Bytes()).
@@ -254,13 +261,13 @@ func (d *CZK) refreshToken() error {
 	}
 
 	if resp.StatusCode() != http.StatusOK {
-		return fmt.Errorf("token refresh failed with status %d: %s", resp.StatusCode(), resp.String())
+		return fmt.Errorf("token refresh failed with status %d: %s, response body: %s", resp.StatusCode(), resp.Status(), string(resp.Body()))
 	}
 
 	// 解析刷新令牌响应，更新access_token等
 	var refreshResp RefreshResp
 	if err := json.Unmarshal(resp.Body(), &refreshResp); err != nil {
-		return fmt.Errorf("failed to parse refresh response: %w", err)
+		return fmt.Errorf("failed to parse refresh response: %w, response body: %s", err, string(resp.Body()))
 	}
 	
 	// 检查API返回的状态码
