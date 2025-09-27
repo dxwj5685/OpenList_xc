@@ -812,8 +812,8 @@ func (d *CZK) Put(ctx context.Context, dstDir model.Obj, file model.FileStreamer
 	// 检查响应中是否有错误信息，根据API示例使用code字段
 	if code, ok := completeRespData["code"].(float64); ok && int64(code) != 200 {
 		message := "unknown error"
-		if msg, ok := completeRespData["msg"].(string); ok {
-			// 根据API文档，使用msg字段而非message字段
+		if msg, ok := completeRespData["message"].(string); ok {
+			// 根据API文档，使用message字段
 			message = msg
 		}
 		return nil, fmt.Errorf("complete upload API error: code=%d, message=%s", int64(code), message)
