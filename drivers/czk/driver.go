@@ -770,6 +770,11 @@ func (d *CZK) Put(ctx context.Context, dstDir model.Obj, file model.FileStreamer
 	// 完成上传
 	completeURL := "https://pan.szczk.top/czkapi/ok_upload"
 
+	// 记录完成上传的参数用于调试
+	log.Printf("CZK complete upload: url=%s, filename=%s, filesize=%d, folder=%s, csrf_token=%s***, file_key=%s***",
+		completeURL, file.GetName(), file.GetSize(), dstDir.GetID(),
+		csrfToken[:min(len(csrfToken), 10)], fileKey[:min(len(fileKey), 10)])
+
 	// 创建完成上传的表单数据
 	completePayload := &bytes.Buffer{}
 	completeWriter := multipart.NewWriter(completePayload)
@@ -799,6 +804,9 @@ func (d *CZK) Put(ctx context.Context, dstDir model.Obj, file model.FileStreamer
 		return nil, fmt.Errorf("failed to send complete upload request: %w", err)
 	}
 
+	// 记录API响应用于调试
+	log.Printf("CZK complete upload response: status=%d, body=%s", completeResp.StatusCode(), string(completeResp.Body()))
+
 	if completeResp.StatusCode() != http.StatusOK {
 		return nil, fmt.Errorf("failed to complete upload with status %d: %s", completeResp.StatusCode(), completeResp.String())
 	}
@@ -806,7 +814,7 @@ func (d *CZK) Put(ctx context.Context, dstDir model.Obj, file model.FileStreamer
 	// 解析完成上传的响应
 	var completeRespData map[string]interface{}
 	if err := json.Unmarshal(completeResp.Body(), &completeRespData); err != nil {
-		return nil, fmt.Errorf("failed to parse upload complete response: %w", err)
+		return nil, fmt.Errorf("failed to parse upload complete response: %w, response body: %s", err, string(completeResp.Body()))
 	}
 
 	// 检查响应中是否有错误信息，根据API示例使用code字段
@@ -815,9 +823,17 @@ func (d *CZK) Put(ctx context.Context, dstDir model.Obj, file model.FileStreamer
 		if msg, ok := completeRespData["msg"].(string); ok {
 			// 根据API文档，使用msg字段而非message字段
 			message = msg
+		} else if msg, ok := completeRespData["message"].(string); ok {
+			// 也检查message字段
+			message = msg
 		}
-		return nil, fmt.Errorf("complete upload API error: code=%d, message=%s", int64(code), message)
+
+		// 提供更详细的错误信息，包括响应内容
+		return nil, fmt.Errorf("complete upload API error: code=%d, message=%s, full response: %s", int64(code), message, string(completeResp.Body()))
 	}
+
+	// 记录成功响应
+	log.Printf("CZK complete upload success: response=%+v", completeRespData)
 
 	// 返回新创建的文件对象
 	newObj := &model.Object{
