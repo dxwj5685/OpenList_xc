@@ -65,9 +65,7 @@ func (d *CZK) List(ctx context.Context, dir model.Obj, args model.ListArgs) ([]m
 		return nil, fmt.Errorf("failed to list files: %s", resp.String())
 	}
 
-	// 解析响应并返回文件列表resp, err := d.client.R().
-    SetHeader("Authorization", "Bearer "+d.AccessToken).
-    Get(url)
+	// 解析响应并返回文件列表
 	var listResp map[string]interface{}
 	if err := json.Unmarshal(resp.Body(), &listResp); err != nil {
 		return nil, fmt.Errorf("failed to parse file list response: %w", err)
